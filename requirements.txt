@@ -1,0 +1,7 @@
+gradio>=4.0.0
+torch>=2.0.0
+torchvision
+Pillow>=9.0.0
+numpy
+opencv-python
+ffmpeg-python
