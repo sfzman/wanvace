@@ -962,3 +962,26 @@ def clean_temp_videos():
                 print(f"[CMD] Error cleaning {folder} folder: {e}") 
                 
     print(f"[CMD] Temporary file cleanup complete") 
+
+def get_video_info(video_path):
+    """获取视频信息"""
+    if not video_path:
+        return "未上传视频"
+    
+    try:
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return "无法读取视频文件"
+        
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = frame_count / fps if fps > 0 else 0
+        
+        cap.release()
+        
+        return f"原始尺寸: {width}x{height}, FPS: {fps:.1f}, 时长: {duration:.1f}秒"
+    except Exception as e:
+        return f"获取视频信息失败: {str(e)}"
