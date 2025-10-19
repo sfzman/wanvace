@@ -1,8 +1,7 @@
 import torch
 
-def clear_vram():
+def clear_vram(pipe=None):
     """释放显存"""
-    global pipe
     try:
         # 清理pipeline
         if pipe is not None:

@@ -32,17 +32,17 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # 全局变量存储pipeline和模型选择
 pipe:WanVideoPipeline = None
-selected_model = "Wan-AI/Wan2.1-VACE-14B"  # 默认选择14B模型
+selected_model = "PAI/Wan2.2-VACE-Fun-A14B"  # 默认选择14B模型
 input_mode = "vace"  # 默认输入模式：vace（深度视频+参考图片）或 inp（首尾帧）
 
 # 定义不同模式对应的模型列表
 VACE_MODELS = [
-    "Wan-AI/Wan2.1-VACE-14B",
+    "PAI/Wan2.2-VACE-Fun-A14B",
     "Wan-AI/Wan2.1-VACE-1.3B"
 ]
 
 INP_MODELS = [
-    "PAI/Wan2.1-Fun-V1.1-14B-InP",
+    "PAI/Wan2.2-Fun-A14B-InP",
     "PAI/Wan2.1-Fun-V1.1-1.3B-InP"
 ]
 
@@ -84,7 +84,7 @@ def update_dimensions(aspect_ratio):
     return 480, 832  # 默认值
 
 
-def initialize_pipeline(model_id="Wan-AI/Wan2.1-VACE-14B", vram_limit=6.0):
+def initialize_pipeline(model_id="PAI/Wan2.2-VACE-Fun-A14B", vram_limit=6.0):
     """初始化WanVideoPipeline"""
     global pipe, selected_model, input_mode
     
@@ -106,15 +106,16 @@ def initialize_pipeline(model_id="Wan-AI/Wan2.1-VACE-14B", vram_limit=6.0):
         else:
             input_mode = "vace"
         
-        if model_id == "Wan-AI/Wan2.1-VACE-14B":
+        if model_id == "PAI/Wan2.2-VACE-Fun-A14B":
             # 14B VACE模型配置
             pipe = WanVideoPipeline.from_pretrained(
                 torch_dtype=torch.bfloat16,
                 device="cuda",
                 model_configs=[
-                    ModelConfig(model_id="Wan-AI/Wan2.1-VACE-14B", origin_file_pattern="diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.1-VACE-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.1-VACE-14B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
+                    ModelConfig(model_id="PAI/Wan2.2-VACE-Fun-A14B", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
+                    ModelConfig(model_id="PAI/Wan2.2-VACE-Fun-A14B", origin_file_pattern="low_noise_model/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
+                    ModelConfig(model_id="PAI/Wan2.2-VACE-Fun-A14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
+                    ModelConfig(model_id="PAI/Wan2.2-VACE-Fun-A14B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
                 ],
             )
         elif model_id == "Wan-AI/Wan2.1-VACE-1.3B":
@@ -128,16 +129,16 @@ def initialize_pipeline(model_id="Wan-AI/Wan2.1-VACE-14B", vram_limit=6.0):
                     ModelConfig(model_id="Wan-AI/Wan2.1-VACE-1.3B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
                 ],
             )
-        elif model_id == "PAI/Wan2.1-Fun-V1.1-14B-InP":
+        elif model_id == "PAI/Wan2.2-Fun-A14B-InP":
             # 14B InP模型配置
             pipe = WanVideoPipeline.from_pretrained(
                 torch_dtype=torch.bfloat16,
                 device="cuda",
                 model_configs=[
-                    ModelConfig(model_id="PAI/Wan2.1-Fun-V1.1-14B-InP", origin_file_pattern="diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                    ModelConfig(model_id="PAI/Wan2.1-Fun-V1.1-14B-InP", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-                    ModelConfig(model_id="PAI/Wan2.1-Fun-V1.1-14B-InP", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
-                    ModelConfig(model_id="PAI/Wan2.1-Fun-V1.1-14B-InP", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth", offload_device="cpu"),
+                    ModelConfig(model_id="PAI/Wan2.2-Fun-A14B-InP", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
+                    ModelConfig(model_id="PAI/Wan2.2-Fun-A14B-InP", origin_file_pattern="low_noise_model/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
+                    ModelConfig(model_id="PAI/Wan2.2-Fun-A14B-InP", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
+                    ModelConfig(model_id="PAI/Wan2.2-Fun-A14B-InP", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
                 ],
             )
         elif model_id == "PAI/Wan2.1-Fun-V1.1-1.3B-InP":
@@ -299,7 +300,7 @@ def process_video(
         print("cleaning temp videos...")
         clean_temp_videos()
         print("clearing vram...")
-        clear_vram()
+        clear_vram(pipe)
         
         return output_path, f"视频生成成功！已保存为 {output_path}"
         
@@ -381,7 +382,7 @@ def create_interface():
                 model_id = gr.Dropdown(
                     label="选择模型",
                     choices=VACE_MODELS,
-                    value="Wan-AI/Wan2.1-VACE-14B",
+                    value="PAI/Wan2.2-VACE-Fun-A14B",
                     info="模型会根据选择的输入模式自动更新"
                 )
                 
@@ -586,10 +587,10 @@ def create_interface():
         
         **标签页与模型对应关系**：
         - **🎬 VACE模式标签页**：显示VACE模型
-          - **Wan-AI/Wan2.1-VACE-14B**：高质量VACE模型，生成效果更好，但需要更多显存和计算时间
+          - **PAI/Wan2.2-VACE-Fun-A14B**：高质量VACE模型，生成效果更好，但需要更多显存和计算时间
           - **Wan-AI/Wan2.1-VACE-1.3B**：轻量级VACE模型，生成速度更快，显存需求更少，适合快速测试
         - **🖼️ 首尾帧模式标签页**：显示InP模型
-          - **PAI/Wan2.1-Fun-V1.1-14B-InP**：高质量首尾帧模型，14B参数
+          - **PAI/Wan2.2-Fun-A14B-InP**：高质量首尾帧模型，14B参数
           - **PAI/Wan2.1-Fun-V1.1-1.3B-InP**：轻量级首尾帧模型，1.3B参数
         
         **输入模式详细说明**：

@@ -14,6 +14,11 @@
 # 安装依赖
 pip install -r requirements.txt
 
+# 安装diffsynth
+git clone https://github.com/modelscope/DiffSynth-Studio.git  
+cd DiffSynth-Studio
+pip install -e .
+
 # 启动界面
 python main.py
 ```

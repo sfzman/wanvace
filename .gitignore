@@ -3,3 +3,4 @@ models/
 __pycache__/
 .gradio/
 *mp4
+test*
