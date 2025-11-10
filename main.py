@@ -56,6 +56,7 @@ INP_MODELS = [
     "PAI/Wan2.1-Fun-V1.1-1.3B-InP",
     # 以下仅仅支持首帧图片，不支持尾帧图片
     "Wan-AI/Wan2.1-I2V-14B-480P",
+    "Wan-AI/Wan2.2-I2V-A14B",
 ]
 
 ANIMATE_MODELS = [
@@ -559,6 +560,19 @@ def initialize_pipeline(model_id="PAI/Wan2.2-VACE-Fun-A14B", vram_limit=6.0):
                     ModelConfig(model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth", offload_device="cpu"),
                 ],
             )
+        elif model_id == "Wan-AI/Wan2.2-I2V-A14B":
+            print(f"正在初始化Wan2.2 I2V模型: {model_id}")
+            # 480P I2V模型配置
+            pipe = WanVideoPipeline.from_pretrained(
+                torch_dtype=torch.bfloat16,
+                device="cuda",
+                model_configs=[
+                    ModelConfig(model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
+                    ModelConfig(model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="low_noise_model/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
+                    ModelConfig(model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
+                    ModelConfig(model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
+                ],
+            )
         elif model_id == "Wan-AI/Wan2.2-Animate-14B":
             # 14B Animate模型配置（与test.py保持一致）
             pipe = WanVideoPipeline.from_pretrained(
@@ -946,15 +960,15 @@ def create_interface():
                         aspect_ratio = gr.Dropdown(
                             label="选择宽高比",
                             choices=list(ASPECT_RATIOS_14b.keys()),
-                            value="16:9_low",
-                            info="选择预设的宽高比，系统会自动计算对应的尺寸\n当前尺寸: 832 × 480"
+                            value="9:16",
+                            info="选择预设的宽高比，系统会自动计算对应的尺寸\n当前尺寸: 720 × 1280"
                         )
                     
                     with gr.TabItem("🔧 手动设置", id="manual_size_tab"):
                         with gr.Row():
                             width = gr.Number(
                                 label="视频宽度",
-                                value=832,
+                                value=720,
                                 minimum=256,
                                 maximum=1280,
                                 step=64,
@@ -962,7 +976,7 @@ def create_interface():
                             )
                             height = gr.Number(
                                 label="视频高度",
-                                value=480,
+                                value=1280,
                                 minimum=256,
                                 maximum=1280,
                                 step=64,
@@ -1005,7 +1019,7 @@ def create_interface():
                     num_inference_steps = gr.Number(
                         label="推理步数",
                         value=40,
-                        minimum=10,
+                        minimum=1,
                         maximum=100,
                         step=1,
                         info="推理步数，步数越多质量越高但速度越慢"
@@ -1014,9 +1028,9 @@ def create_interface():
                 with gr.Row():
                     vram_limit = gr.Slider(
                         label="显存占用量限制",
-                        value=6.0,
+                        value=46.0,
                         minimum=0.0,
-                        maximum=100.0,
+                        maximum=200.0,
                         step=1,
                         info="显存占用量限制（GB），影响显存使用和性能"
                     )
