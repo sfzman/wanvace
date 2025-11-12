@@ -164,7 +164,8 @@ def _task_worker_loop():
             task_id = task.get("id")
             print(f"[worker] 准备执行任务: {task_id} -> {task_file}")
             task["status"] = TASK_STATUS_RUNNING
-            task["started_at"] = datetime.now().isoformat()
+            start_time = datetime.now()
+            task["started_at"] = start_time.isoformat()
             _atomic_write_json(task_file, task)
 
             params = task.get("params", {})
@@ -181,7 +182,7 @@ def _task_worker_loop():
                     params.get("height", 480),
                     params.get("width", 832),
                     params.get("num_frames", 81),
-                    params.get("num_inference_steps", 40),
+                    params.get("num_inference_steps", 30),
                     params.get("vram_limit", 6.0),
                     params.get("model_id", VACE_MODELS[0]),
                     params.get("first_frame"),
@@ -242,6 +243,13 @@ def _task_worker_loop():
                 print(f"[worker] 错误: {str(e)}")
                 print(f"[worker] 完整堆栈:\n{error_trace}")
             finally:
+                # 计算处理时长（秒）
+                if "started_at" in task:
+                    end_time = datetime.now()
+                    duration_seconds = (end_time - start_time).total_seconds()
+                    task["duration_seconds"] = round(duration_seconds, 2)
+                    print(f"[worker] 任务处理时长: {task['duration_seconds']} 秒")
+                
                 task["retries"] = int(task.get("retries", 0)) + (0 if task["status"] == TASK_STATUS_DONE else 1)
                 _atomic_write_json(task_file, task)
         except Exception:
@@ -338,9 +346,9 @@ def enqueue_task(
         print(f"[enqueue] 新任务已创建: {task_id} 于 {task_dir}")
         start_task_worker()
 
-        return None, f"任务已入队：{task_id}\n队列目录：{str(task_dir)}\n稍后在后台依次执行。"
+        return f"✅ 任务已入队：{task_id}\n📁 队列目录：{str(task_dir)}\n⏳ 稍后在后台依次执行，完成后会保存到输出目录。"
     except Exception as e:
-        return None, f"入队失败：{e}"
+        return f"❌ 入队失败：{e}"
 
 def handle_tab_change(evt: gr.SelectData):
     """处理Tab切换事件"""
@@ -960,15 +968,15 @@ def create_interface():
                         aspect_ratio = gr.Dropdown(
                             label="选择宽高比",
                             choices=list(ASPECT_RATIOS_14b.keys()),
-                            value="9:16",
-                            info="选择预设的宽高比，系统会自动计算对应的尺寸\n当前尺寸: 720 × 1280"
+                            value="16:9",
+                            info="选择预设的宽高比，系统会自动计算对应的尺寸\n当前尺寸: 1280 × 720"
                         )
                     
                     with gr.TabItem("🔧 手动设置", id="manual_size_tab"):
                         with gr.Row():
                             width = gr.Number(
                                 label="视频宽度",
-                                value=720,
+                                value=1280,
                                 minimum=256,
                                 maximum=1280,
                                 step=64,
@@ -976,7 +984,7 @@ def create_interface():
                             )
                             height = gr.Number(
                                 label="视频高度",
-                                value=1280,
+                                value=720,
                                 minimum=256,
                                 maximum=1280,
                                 step=64,
@@ -1050,13 +1058,14 @@ def create_interface():
                 )
                 
                 generate_btn = gr.Button("🎬 生成视频", variant="primary", size="lg")
-        
-        with gr.Row():
-            gr.Markdown("## 📹 输出结果")
-        
-        with gr.Row():
-            output_video = gr.Video(label="生成的视频")
-            output_status = gr.Textbox(label="生成状态", interactive=False)
+                
+                output_status = gr.Textbox(
+                    label="任务状态",
+                    value="点击生成视频按钮提交任务到后台队列",
+                    interactive=False,
+                    lines=3,
+                    info="任务提交后会显示任务ID和队列信息，视频生成完成后会保存到指定的输出目录"
+                )
         
         # Tab切换时更新模型选择
         input_tabs.select(
@@ -1151,7 +1160,7 @@ def create_interface():
                 template_video,
                 save_folder_path
             ],
-            outputs=[output_video, output_status]
+            outputs=[output_status]
         )
         
         gr.Markdown("## 📚 使用说明")
