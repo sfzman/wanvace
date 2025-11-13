@@ -55,39 +55,43 @@ def create_preview_tab():
     """创建视频预览标签页"""
     with gr.Column():
         gr.Markdown("## 📹 视频预览")
-        gr.Markdown("预览已生成的视频及其参数信息")
+        gr.Markdown("预览已生成的视频及其参数信息 - 点击缩略图选择任务")
         
         with gr.Row():
-            with gr.Column(scale=1):
-                preview_output_dir = gr.Textbox(
-                    label="输出目录",
-                    value="./outputs",
-                    placeholder="./outputs 或 /path/to/output/folder",
-                    info="指定视频输出目录路径"
-                )
-                
-                refresh_btn = gr.Button("🔄 刷新列表", variant="primary")
-                
-                # 初始化任务列表
-                initial_options, initial_idx = refresh_preview_list("./outputs")
-                task_list = gr.Dropdown(
-                    label="选择任务",
-                    choices=initial_options,
-                    value=initial_options[initial_idx] if initial_idx is not None and initial_options else None,
-                    interactive=True,
-                    info="选择要预览的生成任务"
-                )
-            
+            preview_output_dir = gr.Textbox(
+                label="输出目录",
+                value="./outputs",
+                placeholder="./outputs 或 /path/to/output/folder",
+                info="指定视频输出目录路径",
+                scale=3
+            )
+            refresh_btn = gr.Button("🔄 刷新列表", variant="primary", scale=1)
+        
+        # 初始化任务缩略图列表
+        initial_gallery, initial_idx = refresh_preview_list("./outputs")
+        
+        task_gallery = gr.Gallery(
+            label="任务缩略图（点击缩略图选择要预览的任务）",
+            value=initial_gallery,
+            show_label=True,
+            elem_id="task_gallery",
+            columns=4,
+            rows=2,
+            height="auto",
+            allow_preview=True,
+            interactive=True
+        )
+        
+        with gr.Row():
             with gr.Column(scale=2):
                 preview_video = gr.Video(
                     label="生成的视频",
                     height=400
                 )
-        
-        with gr.Row():
-            with gr.Column():
+            
+            with gr.Column(scale=1):
                 params_summary = gr.Markdown(
-                    value="选择任务后显示参数信息",
+                    value="点击缩略图后显示参数信息",
                     label="参数摘要"
                 )
         
@@ -102,39 +106,33 @@ def create_preview_tab():
         
         # 刷新列表事件
         def refresh_list(output_dir):
-            options, default_idx = refresh_preview_list(output_dir)
-            return gr.Dropdown(choices=options, value=options[default_idx] if default_idx is not None and options else None)
+            gallery_items, default_idx = refresh_preview_list(output_dir)
+            return gr.Gallery(value=gallery_items)
         
         refresh_btn.click(
             fn=refresh_list,
             inputs=[preview_output_dir],
-            outputs=[task_list]
+            outputs=[task_gallery]
         )
         
         preview_output_dir.submit(
             fn=refresh_list,
             inputs=[preview_output_dir],
-            outputs=[task_list]
+            outputs=[task_gallery]
         )
         
-        # 加载预览事件
-        def load_preview(selected_value, output_dir):
-            if not selected_value or selected_value == "暂无已完成的生成任务":
+        # 加载预览事件 - Gallery组件返回选中的索引
+        def load_preview(evt: gr.SelectData, output_dir):
+            if evt is None or evt.index is None:
                 return None, "请先刷新列表并选择任务", "{}"
             
-            # 从选项文本中提取索引（选项格式：时间 | task_id | status）
-            options, _ = refresh_preview_list(output_dir)
-            try:
-                selected_index = options.index(selected_value)
-            except ValueError:
-                return None, "未找到选中的任务", "{}"
-            
+            selected_index = evt.index
             video_path, params_summary_text, task_json = load_task_preview(selected_index, output_dir)
             return video_path, params_summary_text, task_json
         
-        task_list.change(
+        task_gallery.select(
             fn=load_preview,
-            inputs=[task_list, preview_output_dir],
+            inputs=[preview_output_dir],
             outputs=[preview_video, params_summary, task_json_display]
         )
 
