@@ -236,22 +236,11 @@ def refresh_preview_list(output_dir: str = "./outputs") -> Tuple[List[Tuple], Op
     gallery_items = []
     for i, task in enumerate(tasks):
         video_path = task.get("video_path")
-        created_at = task.get("created_at", "unknown")
+        generation_dir = task.get("generation_dir", "")
         task_id = task.get("task_id", "unknown")
-        status = task.get("status", "unknown")
         
-        # 格式化时间显示
-        try:
-            if "_" in created_at:
-                date_part, time_part = created_at.split("_")
-                if len(date_part) == 8 and len(time_part) == 6:
-                    formatted_time = f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]} {time_part[:2]}:{time_part[2:4]}"
-                else:
-                    formatted_time = created_at
-            else:
-                formatted_time = created_at
-        except:
-            formatted_time = created_at
+        # 获取文件夹名称作为标题
+        folder_name = Path(generation_dir).name if generation_dir else f"unknown_{task_id[:8]}"
         
         # 生成缩略图
         thumbnail_path = None
@@ -272,8 +261,8 @@ def refresh_preview_list(output_dir: str = "./outputs") -> Tuple[List[Tuple], Op
             except:
                 thumbnail_path = None
         
-        # 构建标题
-        caption = f"{formatted_time}\n{task_id[:8]}...\n{status}"
+        # 构建标题 - 直接使用文件夹名称
+        caption = folder_name
         
         # Gallery组件需要 (图片路径, 标题) 元组格式
         if thumbnail_path:

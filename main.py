@@ -311,7 +311,7 @@ def create_interface():
                         
                         quality = gr.Slider(
                             label="质量",
-                            value=8,
+                            value=10,
                             minimum=1,
                             maximum=10,
                             step=1,
@@ -342,7 +342,7 @@ def create_interface():
                         with gr.Row():
                             vram_limit = gr.Slider(
                                 label="显存占用量限制",
-                                value=46.0,
+                                value=48.0,
                                 minimum=0.0,
                                 maximum=200.0,
                                 step=1,
@@ -350,8 +350,8 @@ def create_interface():
                             )
                             tiled_checkbox = gr.Checkbox(
                                 label="Tiled VAE Decode", 
-                                value=True, 
-                                info="禁用可能导致VAE错误，但可提高性能"
+                                value=False, 
+                                info="是否启用 VAE 分块推理。设置为 `True` 时可显著减少 VAE 编解码阶段的显存占用，会产生少许误差，以及少量推理时间延长。"
                             )
                         
                         # 视频保存设置
