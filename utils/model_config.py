@@ -17,6 +17,8 @@ INP_MODELS = [
     # 以下仅仅支持首帧图片，不支持尾帧图片
     "Wan-AI/Wan2.1-I2V-14B-480P",
     "Wan-AI/Wan2.2-I2V-A14B",
+    "AnisoraV3.2",
+    "AnisoraV3.1",
 ]
 
 ANIMATE_MODELS = [

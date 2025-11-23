@@ -16,6 +16,9 @@ from diffsynth.pipelines.wan_video_new import WanVideoPipeline, ModelConfig
 from utils.video_utils import clean_temp_videos, reencode_video_to_16fps
 from utils.vram_utils import clear_vram
 from utils.animate.preprocess.process_pipepline import ProcessPipeline
+from utils.model_config import (
+    VACE_MODELS, INP_MODELS, ANIMATE_MODELS
+)
 
 # 全局变量存储pipeline和模型选择
 pipe: WanVideoPipeline = None
@@ -127,7 +130,7 @@ def initialize_pipeline(model_id="PAI/Wan2.2-VACE-Fun-A14B", vram_limit=6.0):
         selected_model = model_id
         
         # 根据模型类型设置输入模式
-        if "InP" in model_id or "I2V" in model_id:
+        if model_id in INP_MODELS:
             input_mode = "inp"
         elif "Animate" in model_id:
             input_mode = "animate"
@@ -219,6 +222,40 @@ def initialize_pipeline(model_id="PAI/Wan2.2-VACE-Fun-A14B", vram_limit=6.0):
                     ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth", offload_device="cpu"),
                 ],
             )
+        elif model_id == "AnisoraV3.2":
+            # 14B Animate模型配置（与test.py保持一致）
+            pipe = WanVideoPipeline.from_pretrained(
+                torch_dtype=torch.bfloat16,
+                device="cuda",
+                model_configs=[
+                    ModelConfig(path=[
+                        "/home/arkstone/workspace/anisora-models/V3.2/high_noise_model/model_part1.safetensors",
+                        "/home/arkstone/workspace/anisora-models/V3.2/high_noise_model/model_part2.safetensors",
+                    ], offload_device="cpu"),
+                    ModelConfig(path=[
+                        "/home/arkstone/workspace/anisora-models/V3.2/low_noise_model/model_part1.safetensors",
+                        "/home/arkstone/workspace/anisora-models/V3.2/low_noise_model/model_part2.safetensors",
+                    ], offload_device="cpu"),
+                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
+                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
+                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth", offload_device="cpu"),
+                ],
+            )
+        elif model_id == "AnisoraV3.1":
+            # 14B Animate模型配置（与test.py保持一致）
+            pipe = WanVideoPipeline.from_pretrained(
+                torch_dtype=torch.bfloat16,
+                device="cuda",
+                model_configs=[
+                    ModelConfig(path=[
+                        "/home/arkstone/workspace/anisora-models/V3.1/model_part1.safetensors",
+                        "/home/arkstone/workspace/anisora-models/V3.1/model_part2.safetensors",
+                    ], offload_device="cpu"),
+                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
+                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
+                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth", offload_device="cpu"),
+                ],
+            )
         
         # 将GB转换为字节
         num_persistent_param_in_dit = int(vram_limit * 1024**3)
@@ -255,7 +292,7 @@ def process_video(
     global pipe
     try:
         # 根据模型类型判断输入模式
-        is_inp_mode = ("InP" in model_id) or ("I2V" in model_id)
+        is_inp_mode = model_id in INP_MODELS
         is_animate_mode = "Animate" in model_id
         
         if is_inp_mode:
@@ -328,8 +365,8 @@ def process_video(
                     width=width,
                     num_frames=num_frames,
                     num_inference_steps=num_inference_steps,
-                    cfg_scale=6.0,
-                    sigma_shift=6.0,
+                    cfg_scale=5.0,
+                    sigma_shift=5.0,
                 )
             else:
                 return None, "首尾帧模式需要上传首帧图片"
