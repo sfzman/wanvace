@@ -133,7 +133,7 @@ def _task_worker_loop():
                     params.get("model_id", VACE_MODELS[0]),
                     params.get("first_frame"),
                     params.get("last_frame"),
-                    params.get("tiled", True),
+                    params.get("tiled", False),
                     params.get("animate_reference_image"),
                     params.get("template_video"),
                     "",  # 传空以跳过process_video中的复制保存
