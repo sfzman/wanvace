@@ -328,11 +328,11 @@ def create_interface():
                                 minimum=16,
                                 maximum=256,
                                 step=1,
-                                info="视频总帧数，建议16-256之间"
+                                info="视频总帧数，建议时长（秒）*FPS+1"
                             )
                             num_inference_steps = gr.Number(
                                 label="推理步数",
-                                value=30,
+                                value=15,
                                 minimum=1,
                                 maximum=100,
                                 step=1,

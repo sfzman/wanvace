@@ -189,6 +189,16 @@ def extract_video_thumbnail(video_path: str, output_path: Optional[str] = None) 
             video_file = Path(video_path)
             output_path = str(video_file.parent / f"{video_file.stem}_thumb.jpg")
         
+        output_path_obj = Path(output_path)
+        
+        # 检查缩略图是否已存在，且视频文件未被修改
+        if output_path_obj.exists():
+            video_mtime = os.path.getmtime(video_path)
+            thumb_mtime = os.path.getmtime(output_path)
+            # 如果缩略图比视频新或时间相近（1秒内），直接使用缓存
+            if thumb_mtime >= video_mtime - 1:
+                return output_path
+        
         # 使用ffmpeg提取第一帧
         cmd = [
             "ffmpeg",
