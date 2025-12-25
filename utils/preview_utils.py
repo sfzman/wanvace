@@ -4,6 +4,7 @@
 """
 import os
 import json
+import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
@@ -227,7 +228,7 @@ def extract_video_thumbnail(video_path: str, output_path: Optional[str] = None) 
         return None
 
 
-def refresh_preview_list(output_dir: str = "./outputs") -> Tuple[List[Tuple], Optional[int]]:
+def refresh_preview_list(output_dir: str = "./outputs") -> Tuple[List[Tuple], Optional[int], List[Dict]]:
     """
     刷新预览列表，返回任务缩略图列表和默认选中的任务索引
     
@@ -235,13 +236,13 @@ def refresh_preview_list(output_dir: str = "./outputs") -> Tuple[List[Tuple], Op
         output_dir: 输出目录路径
         
     Returns:
-        (任务缩略图列表, 默认选中任务的索引)
+        (任务缩略图列表, 默认选中任务的索引, 任务数据列表)
         每个任务是 (图片路径, 标题) 元组，用于Gradio Gallery组件
     """
     tasks = scan_generation_directories(output_dir)
     
     if not tasks:
-        return [], None
+        return [], None, []
     
     gallery_items = []
     for i, task in enumerate(tasks):
@@ -288,11 +289,15 @@ def refresh_preview_list(output_dir: str = "./outputs") -> Tuple[List[Tuple], Op
                 # 最后的备选方案：只使用标题
                 gallery_items.append((None, caption))
     
-    # 返回缩略图列表和第一个任务的索引（用于默认选中）
-    return gallery_items, 0 if gallery_items else None
+    # 返回缩略图列表、默认索引以及任务列表，供前端缓存
+    return gallery_items, 0 if gallery_items else None, tasks
 
 
-def load_task_preview(selected_index: int, output_dir: str = "./outputs") -> Tuple[Optional[str], str, str]:
+def load_task_preview(
+    selected_index: int,
+    output_dir: str = "./outputs",
+    cached_tasks: Optional[List[Dict]] = None,
+) -> Tuple[Optional[str], str, str]:
     """
     加载选中任务的预览信息
     
@@ -303,7 +308,7 @@ def load_task_preview(selected_index: int, output_dir: str = "./outputs") -> Tup
     Returns:
         (视频路径, 参数摘要, 任务详情JSON)
     """
-    tasks = scan_generation_directories(output_dir)
+    tasks = cached_tasks if cached_tasks is not None else scan_generation_directories(output_dir)
     
     if not tasks or selected_index is None or selected_index >= len(tasks):
         return None, "未找到任务", "{}"
@@ -323,4 +328,52 @@ def load_task_preview(selected_index: int, output_dir: str = "./outputs") -> Tup
     task_json = json.dumps(task_data, ensure_ascii=False, indent=2) if task_data else "{}"
     
     return video_path, params_summary, task_json
+
+
+def delete_task_files(task: Dict) -> Tuple[bool, str]:
+    """
+    删除任务对应的生成目录及相关文件
+    
+    Args:
+        task: 任务信息字典
+        
+    Returns:
+        (是否成功, 提示信息)
+    """
+    if not task:
+        return False, "未找到任务信息"
+    
+    generation_dir = task.get("generation_dir")
+    if not generation_dir:
+        return False, "任务缺少生成目录信息"
+    
+    generation_path = Path(generation_dir)
+    video_path = task.get("video_path")
+    
+    try:
+        # 优先删除生成目录
+        if generation_path.exists():
+            shutil.rmtree(generation_path)
+        else:
+            return False, f"目录不存在：{generation_path}"
+        
+        # 如果视频文件在目录外，单独删除
+        if video_path:
+            video_path_obj = Path(video_path)
+            try:
+                # Python 3.9+: Path.is_relative_to
+                if not video_path_obj.is_relative_to(generation_path):
+                    if video_path_obj.exists():
+                        video_path_obj.unlink()
+            except ValueError:
+                # Python <3.9 fallback
+                try:
+                    video_path_obj.relative_to(generation_path)
+                except ValueError:
+                    if video_path_obj.exists():
+                        video_path_obj.unlink()
+        
+        return True, f"已删除任务目录：{generation_path.name}"
+    except Exception as e:
+        return False, f"删除任务失败：{e}"
 

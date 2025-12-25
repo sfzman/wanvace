@@ -4,7 +4,7 @@ import gradio as gr
 from utils.video_utils import get_video_info
 from utils.img_utils import get_image_info
 from utils.vram_utils import clear_vram, get_vram_info
-from utils.preview_utils import refresh_preview_list, load_task_preview
+from utils.preview_utils import refresh_preview_list, load_task_preview, delete_task_files
 from utils.model_config import (
     VACE_MODELS, INP_MODELS, ANIMATE_MODELS, 
     ASPECT_RATIOS_14b, get_models_by_mode
@@ -57,6 +57,8 @@ def create_preview_tab():
         gr.Markdown("## 📹 视频预览")
         gr.Markdown("预览已生成的视频及其参数信息 - 点击缩略图选择任务")
         
+        DEFAULT_PARAM_SUMMARY = "点击缩略图后显示参数信息"
+        
         with gr.Row():
             preview_output_dir = gr.Textbox(
                 label="输出目录",
@@ -68,7 +70,9 @@ def create_preview_tab():
             refresh_btn = gr.Button("🔄 刷新列表", variant="primary", scale=1)
         
         # 初始化任务缩略图列表
-        initial_gallery, initial_idx = refresh_preview_list("./outputs")
+        initial_gallery, initial_idx, initial_tasks = refresh_preview_list("./outputs")
+        preview_tasks_state = gr.State(initial_tasks)
+        selected_task_index_state = gr.State(None)
         
         task_gallery = gr.Gallery(
             label="任务缩略图（点击缩略图选择要预览的任务）",
@@ -91,7 +95,7 @@ def create_preview_tab():
             
             with gr.Column(scale=1):
                 params_summary = gr.Markdown(
-                    value="点击缩略图后显示参数信息",
+                    value=DEFAULT_PARAM_SUMMARY,
                     label="参数摘要"
                 )
         
@@ -104,36 +108,106 @@ def create_preview_tab():
                     interactive=False
                 )
         
+        with gr.Row():
+            delete_btn = gr.Button("🗑️ 删除选中任务", variant="stop", scale=1)
+            action_status = gr.Textbox(
+                label="操作状态",
+                value="",
+                interactive=False
+            )
+        
         # 刷新列表事件
         def refresh_list(output_dir):
-            gallery_items, default_idx = refresh_preview_list(output_dir)
-            return gr.Gallery(value=gallery_items)
+            gallery_items, _, tasks = refresh_preview_list(output_dir)
+            # 返回更新后的Gallery内容以及任务缓存
+            return gr.update(value=gallery_items), tasks
         
         refresh_btn.click(
             fn=refresh_list,
             inputs=[preview_output_dir],
-            outputs=[task_gallery]
+            outputs=[task_gallery, preview_tasks_state]
         )
         
         preview_output_dir.submit(
             fn=refresh_list,
             inputs=[preview_output_dir],
-            outputs=[task_gallery]
+            outputs=[task_gallery, preview_tasks_state]
         )
         
         # 加载预览事件 - Gallery组件返回选中的索引
-        def load_preview(evt: gr.SelectData, output_dir):
+        def load_preview(evt: gr.SelectData, tasks, output_dir):
             if evt is None or evt.index is None:
-                return None, "请先刷新列表并选择任务", "{}"
-            
+                return None, DEFAULT_PARAM_SUMMARY, "{}", None
+            if not tasks:
+                return None, "当前没有可预览的任务，请先刷新列表", "{}", None
+
             selected_index = evt.index
-            video_path, params_summary_text, task_json = load_task_preview(selected_index, output_dir)
-            return video_path, params_summary_text, task_json
+            if selected_index >= len(tasks):
+                return None, "任务索引已过期，请刷新列表后重试", "{}", None
+
+            video_path, params_summary_text, task_json = load_task_preview(
+                selected_index,
+                output_dir,
+                cached_tasks=tasks,
+            )
+            return video_path, params_summary_text, task_json, selected_index
         
         task_gallery.select(
             fn=load_preview,
-            inputs=[preview_output_dir],
-            outputs=[preview_video, params_summary, task_json_display]
+            inputs=[preview_tasks_state, preview_output_dir],
+            outputs=[preview_video, params_summary, task_json_display, selected_task_index_state]
+        )
+
+        def delete_selected_task(tasks, selected_index, output_dir):
+            if not tasks:
+                return (
+                    gr.update(),
+                    tasks,
+                    None,
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                    "当前没有任务可以删除，请先刷新列表"
+                )
+            if selected_index is None or selected_index >= len(tasks):
+                return (
+                    gr.update(),
+                    tasks,
+                    None,
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                    "请选择一个要删除的任务"
+                )
+
+            task = tasks[selected_index]
+            success, message = delete_task_files(task)
+
+            # 无论成功与否，刷新列表保持状态一致
+            gallery_items, _, new_tasks = refresh_preview_list(output_dir)
+
+            return (
+                gr.update(value=gallery_items),
+                new_tasks,
+                None if success else selected_index,
+                gr.update(value=None) if success else gr.update(),
+                gr.update(value=DEFAULT_PARAM_SUMMARY) if success else gr.update(),
+                gr.update(value="{}") if success else gr.update(),
+                message
+            )
+
+        delete_btn.click(
+            fn=delete_selected_task,
+            inputs=[preview_tasks_state, selected_task_index_state, preview_output_dir],
+            outputs=[
+                task_gallery,
+                preview_tasks_state,
+                selected_task_index_state,
+                preview_video,
+                params_summary,
+                task_json_display,
+                action_status,
+            ]
         )
 
 
@@ -311,7 +385,7 @@ def create_interface():
                         
                         quality = gr.Slider(
                             label="质量",
-                            value=10,
+                            value=6,
                             minimum=1,
                             maximum=10,
                             step=1,
