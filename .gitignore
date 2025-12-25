@@ -7,3 +7,5 @@ test*
 outputs/
 examples/
 task_queue/
+.msc
+.mv
