@@ -24,6 +24,7 @@ from utils.model_config import (
 pipe: WanVideoPipeline = None
 selected_model = "PAI/Wan2.2-VACE-Fun-A14B"  # 默认选择14B模型
 input_mode = "vace"  # 默认输入模式：vace（深度视频+参考图片）或 inp（首尾帧）
+last_used_model = None  # 记录上一次处理时使用的模型，用于判断是否需要清理显存
 
 
 def preprocess_template_video(template_video_path, reference_image_path, width, height, num_frames):
@@ -286,10 +287,12 @@ def process_video(
     tiled=False,
     animate_reference_image=None,
     template_video=None,
-    save_folder_path="./outputs"
+    save_folder_path="./outputs",
+    cfg_scale=1.0,
+    sigma_shift=5.0
 ):
     """处理视频生成"""
-    global pipe
+    global pipe, last_used_model
     try:
         # 根据模型类型判断输入模式
         is_inp_mode = model_id in INP_MODELS
@@ -365,8 +368,8 @@ def process_video(
                     width=width,
                     num_frames=num_frames,
                     num_inference_steps=num_inference_steps,
-                    cfg_scale=5.0,
-                    sigma_shift=5.0,
+                    cfg_scale=cfg_scale,
+                    sigma_shift=sigma_shift,
                 )
             else:
                 return None, "首尾帧模式需要上传首帧图片"
@@ -431,8 +434,8 @@ def process_video(
                 width=width,
                 num_frames=num_frames,
                 num_inference_steps=num_inference_steps,
-                cfg_scale=6.0,
-                sigma_shift=6.0,
+                cfg_scale=cfg_scale,
+                sigma_shift=sigma_shift,
             )
             
             # 清理临时文件
@@ -474,8 +477,8 @@ def process_video(
                 width=width,
                 num_frames=num_frames,
                 num_inference_steps=num_inference_steps,
-                cfg_scale=6.0,
-                sigma_shift=6.0,
+                cfg_scale=cfg_scale,
+                sigma_shift=sigma_shift,
                 vace_scale=0.8,
             )
         
@@ -485,8 +488,16 @@ def process_video(
 
         print("cleaning temp videos...")
         clean_temp_videos()
-        print("clearing vram...")
-        clear_vram(pipe)
+        
+        # 只有当模型切换时才清理显存
+        if last_used_model is not None and last_used_model != model_id:
+            print(f"检测到模型切换（{last_used_model} -> {model_id}），清理显存...")
+            clear_vram(pipe)
+        else:
+            print("使用相同模型，跳过显存清理")
+        
+        # 更新上一次使用的模型
+        last_used_model = model_id
         
         # 不再在此处保存/复制；统一由后台线程在任务成功后剪切
         return output_path, f"视频生成成功！已保存为 {output_path}"

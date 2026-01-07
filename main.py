@@ -414,6 +414,24 @@ def create_interface():
                             )
                         
                         with gr.Row():
+                            cfg_scale = gr.Slider(
+                                label="CFG Scale",
+                                value=1.0,
+                                minimum=1.0,
+                                maximum=20.0,
+                                step=0.5,
+                                info="Classifier-Free Guidance 缩放因子，控制生成结果与提示词的匹配程度"
+                            )
+                            sigma_shift = gr.Slider(
+                                label="Sigma Shift",
+                                value=5.0,
+                                minimum=0.0,
+                                maximum=20.0,
+                                step=0.5,
+                                info="Sigma偏移量，影响生成过程的噪声调度"
+                            )
+                        
+                        with gr.Row():
                             vram_limit = gr.Slider(
                                 label="显存占用量限制",
                                 value=48.0,
@@ -538,7 +556,9 @@ def create_interface():
                         tiled_checkbox,
                         animate_reference_image,
                         template_video,
-                        save_folder_path
+                        save_folder_path,
+                        cfg_scale,
+                        sigma_shift
                     ],
                     outputs=[output_status]
                 )

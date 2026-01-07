@@ -137,6 +137,8 @@ def _task_worker_loop():
                     params.get("animate_reference_image"),
                     params.get("template_video"),
                     "",  # 传空以跳过process_video中的复制保存
+                    params.get("cfg_scale", 1.0),
+                    params.get("sigma_shift", 5.0),
                 )
                 task["status"] = TASK_STATUS_DONE if out_path else TASK_STATUS_FAILED
                 task["finished_at"] = datetime.now().isoformat()
@@ -238,7 +240,9 @@ def enqueue_task(
     tiled,
     animate_reference_image,
     template_video,
-    save_folder_path
+    save_folder_path,
+    cfg_scale=1.0,
+    sigma_shift=5.0
 ):
     """将当前生成请求持久化为任务文件并入队（立即返回）。"""
     try:
@@ -276,6 +280,8 @@ def enqueue_task(
             "animate_reference_image": animate_reference_image_path,
             "template_video": template_video_path,
             "save_folder_path": save_folder_path or "./outputs",
+            "cfg_scale": float(cfg_scale) if cfg_scale is not None else 1.0,
+            "sigma_shift": float(sigma_shift) if sigma_shift is not None else 5.0,
         }
 
         task = {
