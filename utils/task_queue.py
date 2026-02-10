@@ -245,6 +245,9 @@ def enqueue_task(
     sigma_shift=5.0
 ):
     """将当前生成请求持久化为任务文件并入队（立即返回）。"""
+
+    if not negative_prompt:
+        negative_prompt = "色调艳丽，过曝，细节模糊不清"
     try:
         _ensure_task_dirs()
         task_id = str(uuid.uuid4())

@@ -406,7 +406,7 @@ def create_interface():
                             )
                             num_inference_steps = gr.Number(
                                 label="推理步数",
-                                value=15,
+                                value=8,
                                 minimum=1,
                                 maximum=100,
                                 step=1,
