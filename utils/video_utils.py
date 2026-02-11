@@ -252,16 +252,16 @@ def reencode_video_to_16fps(input_video_path, num_frames, target_width=None, tar
             # Use ffmpeg to extract audio
             extract_cmd = [
                 'ffmpeg', '-y',
-                '-i', f'"{input_video_path}"',
+                '-i', input_video_path,
                 '-t', str(extract_duration_sec),
                 '-vn',
                 '-c:a', 'aac',
                 '-b:a', '192k',
-                f'"{temp_audio_file}"'
+                temp_audio_file
             ]
-            
+
             print(f"[CMD] Extracting audio with command: {' '.join(extract_cmd)}")
-            result = subprocess.run(' '.join(extract_cmd), shell=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            result = subprocess.run(extract_cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
             
             # Verify the audio file was created successfully
             if os.path.exists(temp_audio_file) and os.path.getsize(temp_audio_file) > 0:
@@ -285,12 +285,12 @@ def reencode_video_to_16fps(input_video_path, num_frames, target_width=None, tar
                         
                     alt_cmd = [
                         'ffmpeg', '-y',
-                        '-i', f'"{input_video_path}"',
+                        '-i', input_video_path,
                         '-t', str(extract_duration_sec),
                         '-vn'
-                    ] + cmd_args + [f'"{alt_audio_file}"']
-                    
-                    subprocess.run(' '.join(alt_cmd), shell=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                    ] + cmd_args + [alt_audio_file]
+
+                    subprocess.run(alt_cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
                     
                     if os.path.exists(alt_audio_file) and os.path.getsize(alt_audio_file) > 0:
                         print(f"[CMD] Successfully extracted audio using {method_name}: {alt_audio_file}")
@@ -313,7 +313,7 @@ def reencode_video_to_16fps(input_video_path, num_frames, target_width=None, tar
             video_cmd = [
                 'ffmpeg', '-y',
                 '-framerate', '16',
-                '-i', f'"{os.path.join(frames_dir, "frame_%06d.png")}"',
+                '-i', os.path.join(frames_dir, "frame_%06d.png"),
                 '-c:v', 'libx264',
                 '-fps_mode', 'passthrough',
                 '-profile:v', 'high',
@@ -322,11 +322,11 @@ def reencode_video_to_16fps(input_video_path, num_frames, target_width=None, tar
                 '-crf', '12',
                 '-pix_fmt', 'yuv420p',
                 '-an',
-                f'"{temp_video_file}"'
+                temp_video_file
             ]
-            
+
             print(f"[CMD] Creating video without audio...")
-            subprocess.run(' '.join(video_cmd), shell=True)
+            subprocess.run(video_cmd)
             
             # Verify the video has the correct number of frames
             verify_cap = cv2.VideoCapture(temp_video_file)
@@ -342,32 +342,32 @@ def reencode_video_to_16fps(input_video_path, num_frames, target_width=None, tar
                         'ffmpeg', '-y',
                         '-r', '16',
                         '-start_number', '0',
-                        '-i', f'"{os.path.join(frames_dir, "frame_%06d.png")}"',
+                        '-i', os.path.join(frames_dir, "frame_%06d.png"),
                         '-vframes', str(num_frames),
                         '-c:v', 'libx264',
                         '-fps_mode', 'passthrough',
                         '-pix_fmt', 'yuv420p',
                         '-an',
-                        f'"{temp_video_file}"'
+                        temp_video_file
                     ]
-                    
+
                     print(f"[CMD] Retrying with alternative encoding method...")
-                    subprocess.run(' '.join(alt_video_cmd), shell=True)
+                    subprocess.run(alt_video_cmd)
             
             # Then combine video and audio
             final_cmd = [
                 'ffmpeg', '-y',
-                '-i', f'"{temp_video_file}"',
-                '-i', f'"{temp_audio_file}"',
+                '-i', temp_video_file,
+                '-i', temp_audio_file,
                 '-c:v', 'copy',
                 '-c:a', 'aac',
                 '-b:a', '192k',
                 '-shortest',
-                f'"{reencoded_video}"'
+                reencoded_video
             ]
-            
+
             print(f"[CMD] Combining video and audio...")
-            subprocess.run(' '.join(final_cmd), shell=True)
+            subprocess.run(final_cmd)
             
             # Clean up temporary video
             if os.path.exists(temp_video_file):
@@ -382,7 +382,7 @@ def reencode_video_to_16fps(input_video_path, num_frames, target_width=None, tar
             video_cmd = [
                 'ffmpeg', '-y',
                 '-framerate', '16',
-                '-i', f'"{os.path.join(frames_dir, "frame_%06d.png")}"',
+                '-i', os.path.join(frames_dir, "frame_%06d.png"),
                 '-c:v', 'libx264',
                 '-fps_mode', 'passthrough',
                 '-vframes', str(num_frames),
@@ -392,10 +392,10 @@ def reencode_video_to_16fps(input_video_path, num_frames, target_width=None, tar
                 '-crf', '12',
                 '-pix_fmt', 'yuv420p',
                 '-an',
-                f'"{reencoded_video}"'
+                reencoded_video
             ]
-            
-            subprocess.run(' '.join(video_cmd), shell=True)
+
+            subprocess.run(video_cmd)
         
         # Verify the frame count and retry with different method if incorrect
         max_attempts = 3
@@ -421,32 +421,32 @@ def reencode_video_to_16fps(input_video_path, num_frames, target_width=None, tar
                         'ffmpeg', '-y',
                         '-r', '16',
                         '-start_number', '0',
-                        '-i', f'"{os.path.join(frames_dir, "frame_%06d.png")}"',
+                        '-i', os.path.join(frames_dir, "frame_%06d.png"),
                         '-vframes', str(num_frames),
                         '-c:v', 'libx264',
                         '-fps_mode', 'passthrough',
                         '-pix_fmt', 'yuv420p',
-                        f'"{reencoded_video}"'
+                        reencoded_video
                     ]
-                    
+
                     if temp_audio_file and os.path.exists(temp_audio_file) and os.path.getsize(temp_audio_file) > 0:
                         # Include audio if available
                         retry_cmd = [
                             'ffmpeg', '-y',
                             '-r', '16',
                             '-start_number', '0',
-                            '-i', f'"{os.path.join(frames_dir, "frame_%06d.png")}"',
-                            '-i', f'"{temp_audio_file}"',
+                            '-i', os.path.join(frames_dir, "frame_%06d.png"),
+                            '-i', temp_audio_file,
                             '-vframes', str(num_frames),
                             '-c:v', 'libx264',
                             '-c:a', 'aac',
                             '-b:a', '192k',
                             '-fps_mode', 'passthrough',
                             '-pix_fmt', 'yuv420p',
-                            f'"{reencoded_video}"'
+                            reencoded_video
                         ]
-                    
-                    subprocess.run(' '.join(retry_cmd), shell=True)
+
+                    subprocess.run(retry_cmd)
                 else:
                     print(f"[CMD] Warning: Could not achieve target frame count after {max_attempts} attempts")
             else:
@@ -561,10 +561,10 @@ def check_video_has_audio(video_path):
             '-print_format', 'json',
             '-show_streams',
             '-select_streams', 'a',
-            '-i', f'"{video_path}"'  # Quoted path for Windows compatibility
+            '-i', video_path
         ]
-        
-        result = subprocess.run(' '.join(cmd), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
         # Try to parse JSON output
         try:
@@ -585,11 +585,11 @@ def check_video_has_audio(video_path):
         print(f"[CMD] Checking if video has audio (Method 2): {video_path}")
         cmd = [
             'ffmpeg',
-            '-i', f'"{video_path}"',
+            '-i', video_path,
             '-hide_banner'
         ]
-        
-        result = subprocess.run(' '.join(cmd), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
         # ffmpeg prints stream info to stderr
         if "Stream #" in result.stderr and "Audio:" in result.stderr:
@@ -603,15 +603,15 @@ def check_video_has_audio(video_path):
         print(f"[CMD] Checking if video has audio (Method 3): {video_path}")
         alt_cmd = [
             'ffmpeg',
-            '-i', f'"{video_path}"',
+            '-i', video_path,
             '-c', 'copy',
             '-map', '0:a?',
             '-f', 'null',
             '-',
             '-v', 'error'
         ]
-        
-        alt_result = subprocess.run(' '.join(alt_cmd), shell=True, stderr=subprocess.PIPE, text=True)
+
+        alt_result = subprocess.run(alt_cmd, stderr=subprocess.PIPE, text=True)
         # If there are no audio streams, ffmpeg will output an error about "Output file #0 does not contain any stream"
         has_audio = "Output file #0 does not contain any stream" not in alt_result.stderr
         if has_audio:
@@ -629,10 +629,10 @@ def check_video_has_audio(video_path):
             '-select_streams', 'a',
             '-show_entries', 'stream=codec_type',
             '-of', 'csv=p=0',
-            f'"{video_path}"'
+            video_path
         ]
-        
-        result = subprocess.run(' '.join(cmd), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
         if result.stdout and 'audio' in result.stdout.lower():
             print(f"[CMD] Audio stream found using Method 4")
@@ -680,17 +680,17 @@ def add_audio_to_video(input_video_path, output_video_path, temp_dir=None, temp_
             
             # Extract audio from input video - use higher verbosity to debug
             extract_cmd = [
-                'ffmpeg', '-y', 
-                '-i', f'"{input_video_path}"',  # Quoted path for Windows compatibility
+                'ffmpeg', '-y',
+                '-i', input_video_path,
                 '-vn',
                 '-c:a', 'aac',
                 '-b:a', '192k',
                 '-v', 'info',
-                f'"{temp_audio_file}"'  # Quoted path for Windows compatibility
+                temp_audio_file
             ]
-            
+
             print(f"[CMD] Extracting audio with command: {' '.join(extract_cmd)}")
-            result = subprocess.run(' '.join(extract_cmd), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            result = subprocess.run(extract_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             
             # Log more details about extraction for debugging
             if result.stdout:
@@ -709,11 +709,11 @@ def add_audio_to_video(input_video_path, output_video_path, temp_dir=None, temp_
                         "name": "copy stream",
                         "cmd": [
                             'ffmpeg', '-y',
-                            '-i', f'"{input_video_path}"',
+                            '-i', input_video_path,
                             '-vn',
                             '-c:a', 'copy',
                             '-v', 'info',
-                            f'"{temp_audio_file}"'
+                            temp_audio_file
                         ]
                     },
                     # Method 2: Try with mp3 codec instead
@@ -721,12 +721,12 @@ def add_audio_to_video(input_video_path, output_video_path, temp_dir=None, temp_
                         "name": "mp3 codec",
                         "cmd": [
                             'ffmpeg', '-y',
-                            '-i', f'"{input_video_path}"',
+                            '-i', input_video_path,
                             '-vn',
                             '-c:a', 'libmp3lame',
                             '-q:a', '4',
                             '-v', 'info',
-                            f'"{os.path.splitext(temp_audio_file)[0] + ".mp3"}"'
+                            os.path.splitext(temp_audio_file)[0] + ".mp3"
                         ]
                     },
                     # Method 3: Explicitly select the audio stream
@@ -734,12 +734,12 @@ def add_audio_to_video(input_video_path, output_video_path, temp_dir=None, temp_
                         "name": "explicit audio stream selection",
                         "cmd": [
                             'ffmpeg', '-y',
-                            '-i', f'"{input_video_path}"',
+                            '-i', input_video_path,
                             '-map', '0:a:0',
                             '-c:a', 'aac',
                             '-b:a', '192k',
                             '-v', 'info',
-                            f'"{temp_audio_file}"'
+                            temp_audio_file
                         ]
                     },
                     # Method 4: Using amr codec for mobile videos
@@ -747,19 +747,19 @@ def add_audio_to_video(input_video_path, output_video_path, temp_dir=None, temp_
                         "name": "amr codec",
                         "cmd": [
                             'ffmpeg', '-y',
-                            '-i', f'"{input_video_path}"',
+                            '-i', input_video_path,
                             '-vn',
                             '-ar', '8000',
                             '-ab', '12.2k',
                             '-c:a', 'libopencore_amrnb',
-                            f'"{os.path.splitext(temp_audio_file)[0] + ".amr"}"'
+                            os.path.splitext(temp_audio_file)[0] + ".amr"
                         ]
                     }
                 ]
-                
+
                 for method in fallback_methods:
                     print(f"[CMD] Trying alternative audio extraction ({method['name']}): {' '.join(method['cmd'])}")
-                    alt_result = subprocess.run(' '.join(method['cmd']), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    alt_result = subprocess.run(method['cmd'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     
                     # For method 2 and 4, we have a different output file
                     if "mp3 codec" in method["name"]:
@@ -808,19 +808,19 @@ def add_audio_to_video(input_video_path, output_video_path, temp_dir=None, temp_
         # Combine video and audio without re-encoding
         combine_cmd = [
             'ffmpeg', '-y',
-            '-i', f'"{output_video_path}"',
-            '-i', f'"{temp_audio_file}"',
+            '-i', output_video_path,
+            '-i', temp_audio_file,
             '-c:v', 'copy',
             '-c:a', 'aac', # Always convert to AAC for output compatibility
             '-b:a', '192k',
             '-map', '0:v:0',
             '-map', '1:a:0',
             '-shortest',
-            f'"{output_with_audio}"'
+            output_with_audio
         ]
-        
+
         print(f"[CMD] Adding audio without re-encoding: {' '.join(combine_cmd)}")
-        result = subprocess.run(' '.join(combine_cmd), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(combine_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
         # Log more details about the combination process
         if result.stderr:
@@ -839,17 +839,17 @@ def add_audio_to_video(input_video_path, output_video_path, temp_dir=None, temp_
                 # Try alternative method - direct copy without mapping
                 alt_combine_cmd = [
                     'ffmpeg', '-y',
-                    '-i', f'"{output_video_path}"',
-                    '-i', f'"{temp_audio_file}"',
+                    '-i', output_video_path,
+                    '-i', temp_audio_file,
                     '-c:v', 'copy',
                     '-c:a', 'aac',
                     '-b:a', '192k',
                     '-shortest',
-                    f'"{output_with_audio}"'
+                    output_with_audio
                 ]
-                
+
                 print(f"[CMD] Trying simplified audio addition: {' '.join(alt_combine_cmd)}")
-                alt_result = subprocess.run(' '.join(alt_combine_cmd), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                alt_result = subprocess.run(alt_combine_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 
                 # Check if the alternative method worked
                 if os.path.exists(output_with_audio) and os.path.getsize(output_with_audio) > 0:
@@ -866,17 +866,17 @@ def add_audio_to_video(input_video_path, output_video_path, temp_dir=None, temp_
                     
                     final_cmd = [
                         'ffmpeg', '-y',
-                        '-i', f'"{abs_output_path}"',
-                        '-i', f'"{abs_audio_path}"',
+                        '-i', abs_output_path,
+                        '-i', abs_audio_path,
                         '-c:v', 'copy',
                         '-c:a', 'aac',
                         '-b:a', '192k',
                         '-shortest',
-                        f'"{abs_output_with_audio}"'
+                        abs_output_with_audio
                     ]
-                    
+
                     print(f"[CMD] Final attempt with absolute paths: {' '.join(final_cmd)}")
-                    final_result = subprocess.run(' '.join(final_cmd), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    final_result = subprocess.run(final_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                     
                     if os.path.exists(output_with_audio) and os.path.getsize(output_with_audio) > 0:
                         has_audio = check_video_has_audio(output_with_audio)

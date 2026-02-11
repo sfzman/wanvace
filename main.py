@@ -1,4 +1,8 @@
 import os
+import sys
+import signal
+import atexit
+import threading
 import gradio as gr
 
 from utils.video_utils import get_video_info
@@ -6,12 +10,72 @@ from utils.img_utils import get_image_info
 from utils.vram_utils import clear_vram, get_vram_info
 from utils.preview_utils import refresh_preview_list, load_task_preview, delete_task_files
 from utils.model_config import (
-    VACE_MODELS, INP_MODELS, ANIMATE_MODELS, 
+    VACE_MODELS, INP_MODELS, ANIMATE_MODELS,
     ASPECT_RATIOS_14b, get_models_by_mode
 )
-from utils.task_queue import enqueue_task, start_task_worker
+from utils.task_queue import enqueue_task, start_task_worker, stop_task_worker, kill_worker_subprocess
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+# ---------------------------------------------------------------------------
+# 优雅退出：信号处理 + atexit
+# ---------------------------------------------------------------------------
+
+_shutdown_lock = threading.Lock()
+_shutdown_done = False
+
+
+def _graceful_shutdown(reason="unknown"):
+    """清理子进程和 CUDA 资源。可被信号处理器和 atexit 安全调用（只执行一次）。"""
+    global _shutdown_done
+    with _shutdown_lock:
+        if _shutdown_done:
+            return
+        _shutdown_done = True
+    print(f"\n[shutdown] 正在清理资源 (原因: {reason})...")
+    try:
+        stop_task_worker()
+    except Exception:
+        pass
+    try:
+        kill_worker_subprocess()
+    except Exception:
+        pass
+    try:
+        clear_vram()
+    except Exception:
+        pass
+    print("[shutdown] 清理完成。")
+
+
+def _signal_handler(signum, frame):
+    sig_name = signal.Signals(signum).name
+    _graceful_shutdown(reason=sig_name)
+    # 启动定时器：如果 10 秒后进程仍未退出，强制终止
+    def _force_exit():
+        print("[shutdown] 清理超时，强制退出。")
+        os._exit(1)
+    t = threading.Timer(10.0, _force_exit)
+    t.daemon = True
+    t.start()
+    sys.exit(0)
+
+
+# 注册信号处理器
+for _sig in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(_sig, _signal_handler)
+if hasattr(signal, "SIGHUP"):
+    signal.signal(signal.SIGHUP, _signal_handler)
+
+# atexit 兜底（正常退出时也清理）
+atexit.register(_graceful_shutdown, reason="atexit")
+
+
+def handle_clear_vram():
+    """释放显存：先终止持有 GPU 的工作子进程，再清理残余缓存。"""
+    kill_worker_subprocess()
+    return clear_vram()
 
 
 def handle_tab_change(evt: gr.SelectData):
@@ -526,7 +590,7 @@ def create_interface():
                 
                 # 显存管理按钮事件
                 clear_vram_btn.click(
-                    fn=clear_vram,
+                    fn=handle_clear_vram,
                     outputs=[vram_info]
                 )
                 

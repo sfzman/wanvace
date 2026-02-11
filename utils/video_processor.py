@@ -492,7 +492,7 @@ def process_video(
         # 只有当模型切换时才清理显存
         if last_used_model is not None and last_used_model != model_id:
             print(f"检测到模型切换（{last_used_model} -> {model_id}），清理显存...")
-            clear_vram(pipe)
+            clear_vram()
         else:
             print("使用相同模型，跳过显存清理")
         

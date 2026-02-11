@@ -1,22 +1,23 @@
 import torch
+import gc
 
-def clear_vram(pipe=None):
-    """释放显存"""
+def clear_vram():
+    """释放显存 — 清理 video_processor 中的全局 pipeline 并释放 CUDA 缓存"""
     try:
-        # 清理pipeline
-        if pipe is not None:
-            del pipe
-            pipe = None
-        
-        # 清理PyTorch缓存
+        import utils.video_processor as vp
+        if vp.pipe is not None:
+            print("[clear_vram] 正在释放全局 pipeline...")
+            del vp.pipe
+            vp.pipe = None
+            vp.selected_model = None
+            vp.last_used_model = None
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
-            
-        # 强制垃圾回收
-        import gc
+
         gc.collect()
-        
+
         return "显存释放完成！"
     except Exception as e:
         return f"显存释放失败：{str(e)}"
