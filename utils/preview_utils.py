@@ -191,14 +191,19 @@ def extract_video_thumbnail(video_path: str, output_path: Optional[str] = None) 
             output_path = str(video_file.parent / f"{video_file.stem}_thumb.jpg")
         
         output_path_obj = Path(output_path)
-        
+
         # 检查缩略图是否已存在，且视频文件未被修改
         if output_path_obj.exists():
             video_mtime = os.path.getmtime(video_path)
             thumb_mtime = os.path.getmtime(output_path)
             # 如果缩略图比视频新或时间相近（1秒内），直接使用缓存
-            if thumb_mtime >= video_mtime - 1:
-                return output_path
+            if thumb_mtime >= video_mtime - 1 and _is_valid_image_file(str(output_path_obj)):
+                return str(output_path_obj)
+            # 旧缓存不可读/损坏时，删除后重建，避免传给 Gradio 触发启动崩溃
+            try:
+                output_path_obj.unlink(missing_ok=True)
+            except Exception:
+                pass
         
         # 使用ffmpeg提取第一帧
         cmd = [
@@ -218,7 +223,9 @@ def extract_video_thumbnail(video_path: str, output_path: Optional[str] = None) 
         )
         
         if result.returncode == 0 and os.path.exists(output_path):
-            return output_path
+            if _is_valid_image_file(output_path):
+                return output_path
+            return None
         else:
             # 如果ffmpeg失败，尝试使用PIL（需要opencv或其他库）
             # 这里先返回None，后续可以改进
@@ -226,6 +233,33 @@ def extract_video_thumbnail(video_path: str, output_path: Optional[str] = None) 
     except Exception as e:
         print(f"提取缩略图失败 {video_path}: {e}")
         return None
+
+
+def _is_valid_image_file(image_path: str) -> bool:
+    """检查图片文件是否存在且可正常读取，避免 Gradio 在缓存阶段崩溃。"""
+    path = Path(image_path)
+    if not path.exists() or not path.is_file():
+        return False
+
+    try:
+        # 一些异常文件在 open/read 时就会报 OSError（如 Errno 61）
+        with open(path, "rb") as f:
+            if not f.read(1):
+                return False
+    except OSError as e:
+        print(f"缩略图不可读 {path}: {e}")
+        return False
+    except Exception as e:
+        print(f"缩略图检查失败 {path}: {e}")
+        return False
+
+    try:
+        with Image.open(path) as img:
+            img.verify()
+        return True
+    except Exception as e:
+        print(f"缩略图损坏 {path}: {e}")
+        return False
 
 
 def refresh_preview_list(output_dir: str = "./outputs") -> Tuple[List[Tuple], Optional[int], List[Dict]]:
@@ -245,6 +279,7 @@ def refresh_preview_list(output_dir: str = "./outputs") -> Tuple[List[Tuple], Op
         return [], None, []
     
     gallery_items = []
+    visible_tasks = []
     for i, task in enumerate(tasks):
         video_path = task.get("video_path")
         generation_dir = task.get("generation_dir", "")
@@ -263,34 +298,46 @@ def refresh_preview_list(output_dir: str = "./outputs") -> Tuple[List[Tuple], Op
         
         # 如果没有缩略图，使用占位符
         if not thumbnail_path:
-            # 创建一个简单的占位符图片
             placeholder = Image.new('RGB', (320, 180), color=(50, 50, 50))
             placeholder_path = str(Path(output_dir) / f"placeholder_{task_id}.jpg")
             try:
                 placeholder.save(placeholder_path)
-                thumbnail_path = str(Path(placeholder_path).resolve())
-            except:
+                placeholder_resolved = str(Path(placeholder_path).resolve())
+                if _is_valid_image_file(placeholder_resolved):
+                    thumbnail_path = placeholder_resolved
+                else:
+                    thumbnail_path = None
+            except Exception:
                 thumbnail_path = None
         
         # 构建标题 - 直接使用文件夹名称
         caption = folder_name
         
         # Gallery组件需要 (图片路径, 标题) 元组格式
-        if thumbnail_path:
-            gallery_items.append((thumbnail_path, caption))
-        else:
+        if not thumbnail_path or not _is_valid_image_file(thumbnail_path):
             # 如果还是没有缩略图，创建一个默认的
             default_placeholder = Image.new('RGB', (320, 180), color=(100, 100, 100))
             default_path = str(Path(tempfile.gettempdir()) / f"default_thumb_{task_id}.jpg")
             try:
                 default_placeholder.save(default_path)
-                gallery_items.append((str(Path(default_path).resolve()), caption))
-            except:
-                # 最后的备选方案：只使用标题
-                gallery_items.append((None, caption))
+                default_resolved_path = str(Path(default_path).resolve())
+                if _is_valid_image_file(default_resolved_path):
+                    thumbnail_path = default_resolved_path
+                else:
+                    thumbnail_path = None
+            except Exception:
+                thumbnail_path = None
+
+        # 没有可用图片时跳过该任务，防止 Gradio 读取无效路径导致启动失败
+        if not thumbnail_path:
+            print(f"跳过预览任务（缩略图不可用）: {task_id}")
+            continue
+
+        gallery_items.append((thumbnail_path, caption))
+        visible_tasks.append(task)
     
     # 返回缩略图列表、默认索引以及任务列表，供前端缓存
-    return gallery_items, 0 if gallery_items else None, tasks
+    return gallery_items, 0 if gallery_items else None, visible_tasks
 
 
 def load_task_preview(
@@ -376,4 +423,3 @@ def delete_task_files(task: Dict) -> Tuple[bool, str]:
         return True, f"已删除任务目录：{generation_path.name}"
     except Exception as e:
         return False, f"删除任务失败：{e}"
-
