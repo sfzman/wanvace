@@ -17,7 +17,7 @@ import shutil
 import time
 from pathlib import Path
 from datetime import datetime
-from utils.model_config import VACE_MODELS
+from utils.model_config import DEFAULT_MEMORY_MODE, VACE_MODELS
 
 # 任务队列配置
 TASK_QUEUE_DIR = Path("./task_queue").resolve()
@@ -36,6 +36,7 @@ _mp_ctx = mp.get_context("spawn")
 _worker_proc = None
 _task_q = None
 _result_q = None
+_worker_proc_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +47,7 @@ def _worker_subprocess_fn(task_q, result_q):
     """在子进程中运行。循环接收任务、调用 process_video、回传结果。
     Pipeline 在子进程的全局变量中缓存，多次任务共享同一 pipeline。"""
     import queue as _queue_mod
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
     while True:
         try:
             params = task_q.get(timeout=1.0)
@@ -72,7 +74,7 @@ def _worker_subprocess_fn(task_q, result_q):
                 params.get("width", 832),
                 params.get("num_frames", 81),
                 params.get("num_inference_steps", 30),
-                params.get("vram_limit", 6.0),
+                params.get("memory_mode", params.get("vram_limit", DEFAULT_MEMORY_MODE)),
                 params.get("model_id", _vm[0]),
                 params.get("first_frame"),
                 params.get("last_frame"),
@@ -93,37 +95,46 @@ def _start_worker_subprocess():
     """启动（或重新启动）工作子进程。"""
     global _worker_proc, _task_q, _result_q
     kill_worker_subprocess()
-    _task_q = _mp_ctx.Queue()
-    _result_q = _mp_ctx.Queue()
-    _worker_proc = _mp_ctx.Process(
+    task_q = _mp_ctx.Queue()
+    result_q = _mp_ctx.Queue()
+    worker_proc = _mp_ctx.Process(
         target=_worker_subprocess_fn,
-        args=(_task_q, _result_q),
+        args=(task_q, result_q),
         daemon=True,
     )
-    _worker_proc.start()
-    print(f"[worker] 工作子进程已启动 (PID: {_worker_proc.pid})")
+    worker_proc.start()
+    with _worker_proc_lock:
+        _task_q = task_q
+        _result_q = result_q
+        _worker_proc = worker_proc
+    print(f"[worker] 工作子进程已启动 (PID: {worker_proc.pid})")
 
 
 def kill_worker_subprocess():
     """终止工作子进程并清理队列。可被信号处理器安全调用。"""
     global _worker_proc, _task_q, _result_q
-    if _worker_proc is not None:
-        if _worker_proc.is_alive():
-            print(f"[worker] 终止工作子进程 (PID: {_worker_proc.pid})...")
-            _worker_proc.terminate()
-            _worker_proc.join(5)
-            if _worker_proc.is_alive():
-                _worker_proc.kill()
-                _worker_proc.join(2)
+    with _worker_proc_lock:
+        worker_proc = _worker_proc
+        task_q = _task_q
+        result_q = _result_q
         _worker_proc = None
-    for q in (_task_q, _result_q):
+        _task_q = None
+        _result_q = None
+
+    if worker_proc is not None:
+        if worker_proc.is_alive():
+            print(f"[worker] 终止工作子进程 (PID: {worker_proc.pid})...")
+            worker_proc.terminate()
+            worker_proc.join(5)
+            if worker_proc.is_alive():
+                worker_proc.kill()
+                worker_proc.join(2)
+    for q in (task_q, result_q):
         if q is not None:
             try:
                 q.close()
             except Exception:
                 pass
-    _task_q = None
-    _result_q = None
 
 
 # ---------------------------------------------------------------------------
@@ -227,11 +238,20 @@ def _task_worker_loop():
             params = task.get("params", {})
 
             # 确保子进程存活
-            if _worker_proc is None or not _worker_proc.is_alive():
+            with _worker_proc_lock:
+                worker_proc = _worker_proc
+            if worker_proc is None or not worker_proc.is_alive():
                 _start_worker_subprocess()
 
             # 发送任务到子进程
-            _task_q.put(params)
+            with _worker_proc_lock:
+                task_q = _task_q
+                result_q = _result_q
+            if task_q is None or result_q is None:
+                if _worker_stop_event.is_set():
+                    break
+                raise RuntimeError("工作子进程队列未初始化")
+            task_q.put(params)
 
             # 轮询等待结果（每秒检查一次超时、子进程状态、停止事件）
             out_path = None
@@ -241,11 +261,19 @@ def _task_worker_loop():
 
             while elapsed < TASK_TIMEOUT and not _worker_stop_event.is_set():
                 # 子进程意外退出
-                if _worker_proc is not None and not _worker_proc.is_alive():
-                    result = ("error", "工作子进程异常退出", f"Exit code: {_worker_proc.exitcode}")
+                with _worker_proc_lock:
+                    worker_proc = _worker_proc
+                    result_q = _result_q
+                if worker_proc is not None and not worker_proc.is_alive():
+                    result = ("error", "工作子进程异常退出", f"Exit code: {worker_proc.exitcode}")
+                    break
+                if result_q is None:
+                    if _worker_stop_event.is_set():
+                        break
+                    result = ("error", "工作结果队列不可用", "result queue is None")
                     break
                 try:
-                    result = _result_q.get(timeout=1.0)
+                    result = result_q.get(timeout=1.0)
                     break
                 except queue.Empty:
                     elapsed += 1.0
@@ -359,7 +387,7 @@ def enqueue_task(
     width,
     num_frames,
     num_inference_steps,
-    vram_limit,
+    memory_mode,
     model_id,
     first_frame,
     last_frame,
@@ -400,7 +428,7 @@ def enqueue_task(
             "width": int(width) if width is not None else 832,
             "num_frames": int(num_frames) if num_frames is not None else 81,
             "num_inference_steps": int(num_inference_steps) if num_inference_steps is not None else 40,
-            "vram_limit": float(vram_limit) if vram_limit is not None else 6.0,
+            "memory_mode": memory_mode or DEFAULT_MEMORY_MODE,
             "model_id": model_id,
             "first_frame": first_frame_path,
             "last_frame": last_frame_path,

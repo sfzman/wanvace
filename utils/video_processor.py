@@ -2,34 +2,152 @@
 视频处理模块
 包含视频生成、pipeline初始化、模板视频预处理等核心逻辑
 """
+import os
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
 import random
 import torch
 import gc
-import os
 import shutil
 import tempfile
 import time
 from PIL import Image
-from diffsynth import save_video, VideoData
-from diffsynth.pipelines.wan_video_new import WanVideoPipeline, ModelConfig
+
+try:
+    from diffsynth.utils.data import save_video, VideoData
+except ImportError:
+    # 兼容旧版本 DiffSynth 在包根目录导出工具函数的方式
+    from diffsynth import save_video, VideoData
+
+try:
+    from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
+except ImportError:
+    # 兼容旧版本模块名
+    from diffsynth.pipelines.wan_video_new import WanVideoPipeline, ModelConfig
 
 from utils.video_utils import clean_temp_videos, reencode_video_to_16fps
 from utils.vram_utils import clear_vram
-from utils.animate.preprocess.process_pipepline import ProcessPipeline
 from utils.model_config import (
-    VACE_MODELS, INP_MODELS, ANIMATE_MODELS
+    ANIMATE_MODELS, DEFAULT_MEMORY_MODE, INP_MODELS, MEMORY_MODE_BALANCED,
+    MEMORY_MODE_EXTREME, VACE_MODELS
 )
 
 # 全局变量存储pipeline和模型选择
 pipe: WanVideoPipeline = None
 selected_model = "PAI/Wan2.2-VACE-Fun-A14B"  # 默认选择14B模型
+selected_memory_mode = None  # 记录当前pipeline使用的显存模式
+selected_vram_limit = None  # 记录当前pipeline使用的显存限制
 input_mode = "vace"  # 默认输入模式：vace（深度视频+参考图片）或 inp（首尾帧）
 last_used_model = None  # 记录上一次处理时使用的模型，用于判断是否需要清理显存
+
+
+def get_auto_vram_limit():
+    """自动计算显存管理阈值：总显存减去约 2GB 缓冲。"""
+    total_vram_gb = torch.cuda.mem_get_info("cuda")[1] / (1024 ** 3)
+    return max(total_vram_gb - 2.0, 0.0)
+
+
+def normalize_vram_limit(vram_limit):
+    """将显存限制标准化为 GB；0 表示最激进的显存管理模式。"""
+    if vram_limit is None:
+        return None
+    try:
+        vram_limit = float(vram_limit)
+    except (TypeError, ValueError):
+        return None
+    if vram_limit < 0:
+        return None
+    return vram_limit
+
+
+def resolve_memory_profile(memory_mode):
+    """将显存模式解析为内部配置；兼容历史任务中的 vram_limit 数值。"""
+    if isinstance(memory_mode, (int, float)):
+        vram_limit = normalize_vram_limit(memory_mode)
+        return {
+            "mode_key": "legacy_manual",
+            "mode_label": f"手动显存限制 ({vram_limit} GB)",
+            "vram_limit": vram_limit,
+            "use_disk_offload": False,
+        }
+
+    if isinstance(memory_mode, str):
+        stripped = memory_mode.strip()
+        if stripped:
+            try:
+                vram_limit = normalize_vram_limit(float(stripped))
+            except ValueError:
+                pass
+            else:
+                return {
+                    "mode_key": "legacy_manual",
+                    "mode_label": f"手动显存限制 ({vram_limit} GB)",
+                    "vram_limit": vram_limit,
+                    "use_disk_offload": False,
+                }
+            if stripped == MEMORY_MODE_EXTREME:
+                return {
+                    "mode_key": MEMORY_MODE_EXTREME,
+                    "mode_label": MEMORY_MODE_EXTREME,
+                    "vram_limit": get_auto_vram_limit(),
+                    "use_disk_offload": True,
+                }
+            if stripped == MEMORY_MODE_BALANCED:
+                return {
+                    "mode_key": MEMORY_MODE_BALANCED,
+                    "mode_label": MEMORY_MODE_BALANCED,
+                    "vram_limit": get_auto_vram_limit(),
+                    "use_disk_offload": False,
+                }
+
+    return {
+        "mode_key": DEFAULT_MEMORY_MODE,
+        "mode_label": DEFAULT_MEMORY_MODE,
+        "vram_limit": get_auto_vram_limit(),
+        "use_disk_offload": False,
+    }
+
+
+def build_model_config(use_disk_offload=False, **kwargs):
+    if use_disk_offload:
+        return ModelConfig(
+            offload_dtype="disk",
+            offload_device="disk",
+            onload_dtype=torch.bfloat16,
+            onload_device="cpu",
+            preparing_dtype=torch.bfloat16,
+            preparing_device="cuda",
+            computation_dtype=torch.bfloat16,
+            computation_device="cuda",
+            **kwargs,
+        )
+    return ModelConfig(
+        offload_dtype=torch.bfloat16,
+        offload_device="cpu",
+        onload_dtype=torch.bfloat16,
+        onload_device="cpu",
+        preparing_dtype=torch.bfloat16,
+        preparing_device="cuda",
+        computation_dtype=torch.bfloat16,
+        computation_device="cuda",
+        **kwargs,
+    )
+
+
+def _create_pipeline(model_configs, vram_limit):
+    return WanVideoPipeline.from_pretrained(
+        torch_dtype=torch.bfloat16,
+        device="cuda",
+        model_configs=model_configs,
+        vram_limit=vram_limit,
+    )
 
 
 def preprocess_template_video(template_video_path, reference_image_path, width, height, num_frames):
     """预处理模板视频，生成pose和face视频"""
     try:
+        from utils.animate.preprocess.process_pipepline import ProcessPipeline
+
         # 创建临时目录用于存储预处理结果
         temp_dir = tempfile.mkdtemp(prefix="wanvace_preprocess_")
         
@@ -114,21 +232,38 @@ def preprocess_template_video(template_video_path, reference_image_path, width, 
         return None, None, error_msg
 
 
-def initialize_pipeline(model_id="PAI/Wan2.2-VACE-Fun-A14B", vram_limit=6.0):
+def initialize_pipeline(model_id="PAI/Wan2.2-VACE-Fun-A14B", memory_mode=DEFAULT_MEMORY_MODE):
     """初始化WanVideoPipeline"""
-    global pipe, selected_model, input_mode
+    global pipe, selected_memory_mode, selected_model, selected_vram_limit, input_mode
+    profile = resolve_memory_profile(memory_mode)
+    memory_mode_key = profile["mode_key"]
+    memory_mode_label = profile["mode_label"]
+    vram_limit = profile["vram_limit"]
+    use_disk_offload = profile["use_disk_offload"]
     
-    # 如果模型改变了，需要重新初始化
-    if pipe is not None and selected_model != model_id:
-        print(f"模型从 {selected_model} 切换到 {model_id}，重新初始化...")
+    should_reinitialize = (
+        pipe is None
+        or selected_model != model_id
+        or selected_memory_mode != memory_mode_key
+        or selected_vram_limit != vram_limit
+    )
+
+    if pipe is not None and should_reinitialize:
+        print(
+            f"重新初始化Pipeline: model {selected_model} -> {model_id}, "
+            f"memory_mode {selected_memory_mode} -> {memory_mode_key}, "
+            f"vram_limit {selected_vram_limit} -> {vram_limit}"
+        )
         del pipe
         pipe = None
         torch.cuda.empty_cache()
         gc.collect()
     
-    if pipe is None:
+    if should_reinitialize:
         print(f"正在初始化模型: {model_id}")
         selected_model = model_id
+        selected_memory_mode = memory_mode_key
+        selected_vram_limit = vram_limit
         
         # 根据模型类型设置输入模式
         if model_id in INP_MODELS:
@@ -140,131 +275,119 @@ def initialize_pipeline(model_id="PAI/Wan2.2-VACE-Fun-A14B", vram_limit=6.0):
         
         if model_id == "PAI/Wan2.2-VACE-Fun-A14B":
             # 14B VACE模型配置
-            pipe = WanVideoPipeline.from_pretrained(
-                torch_dtype=torch.bfloat16,
-                device="cuda",
+            pipe = _create_pipeline(
                 model_configs=[
-                    ModelConfig(model_id="PAI/Wan2.2-VACE-Fun-A14B", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                    ModelConfig(model_id="PAI/Wan2.2-VACE-Fun-A14B", origin_file_pattern="low_noise_model/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                    ModelConfig(model_id="PAI/Wan2.2-VACE-Fun-A14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-                    ModelConfig(model_id="PAI/Wan2.2-VACE-Fun-A14B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="PAI/Wan2.2-VACE-Fun-A14B", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="PAI/Wan2.2-VACE-Fun-A14B", origin_file_pattern="low_noise_model/diffusion_pytorch_model*.safetensors"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="PAI/Wan2.2-VACE-Fun-A14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="PAI/Wan2.2-VACE-Fun-A14B", origin_file_pattern="Wan2.1_VAE.pth"),
                 ],
+                vram_limit=vram_limit,
             )
         elif model_id == "Wan-AI/Wan2.1-VACE-1.3B":
             # 1.3B VACE模型配置
-            pipe = WanVideoPipeline.from_pretrained(
-                torch_dtype=torch.bfloat16,
-                device="cuda",
+            pipe = _create_pipeline(
                 model_configs=[
-                    ModelConfig(model_id="Wan-AI/Wan2.1-VACE-1.3B", origin_file_pattern="diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.1-VACE-1.3B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.1-VACE-1.3B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.1-VACE-1.3B", origin_file_pattern="diffusion_pytorch_model*.safetensors"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.1-VACE-1.3B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.1-VACE-1.3B", origin_file_pattern="Wan2.1_VAE.pth"),
                 ],
+                vram_limit=vram_limit,
             )
         elif model_id == "PAI/Wan2.2-Fun-A14B-InP":
             # 14B InP模型配置
-            pipe = WanVideoPipeline.from_pretrained(
-                torch_dtype=torch.bfloat16,
-                device="cuda",
+            pipe = _create_pipeline(
                 model_configs=[
-                    ModelConfig(model_id="PAI/Wan2.2-Fun-A14B-InP", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                    ModelConfig(model_id="PAI/Wan2.2-Fun-A14B-InP", origin_file_pattern="low_noise_model/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                    ModelConfig(model_id="PAI/Wan2.2-Fun-A14B-InP", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-                    ModelConfig(model_id="PAI/Wan2.2-Fun-A14B-InP", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="PAI/Wan2.2-Fun-A14B-InP", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="PAI/Wan2.2-Fun-A14B-InP", origin_file_pattern="low_noise_model/diffusion_pytorch_model*.safetensors"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="PAI/Wan2.2-Fun-A14B-InP", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="PAI/Wan2.2-Fun-A14B-InP", origin_file_pattern="Wan2.1_VAE.pth"),
                 ],
+                vram_limit=vram_limit,
             )
         elif model_id == "PAI/Wan2.1-Fun-V1.1-1.3B-InP":
             # 1.3B InP模型配置
-            pipe = WanVideoPipeline.from_pretrained(
-                torch_dtype=torch.bfloat16,
-                device="cuda",
+            pipe = _create_pipeline(
                 model_configs=[
-                    ModelConfig(model_id="PAI/Wan2.1-Fun-V1.1-1.3B-InP", origin_file_pattern="diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                    ModelConfig(model_id="PAI/Wan2.1-Fun-V1.1-1.3B-InP", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-                    ModelConfig(model_id="PAI/Wan2.1-Fun-V1.1-1.3B-InP", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
-                    ModelConfig(model_id="PAI/Wan2.1-Fun-1.3B-InP", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth", offload_device="cpu"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="PAI/Wan2.1-Fun-V1.1-1.3B-InP", origin_file_pattern="diffusion_pytorch_model*.safetensors"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="PAI/Wan2.1-Fun-V1.1-1.3B-InP", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="PAI/Wan2.1-Fun-V1.1-1.3B-InP", origin_file_pattern="Wan2.1_VAE.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="PAI/Wan2.1-Fun-1.3B-InP", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"),
                 ],
+                vram_limit=vram_limit,
             )
         elif model_id == "Wan-AI/Wan2.1-I2V-14B-480P":
             print(f"正在初始化480P I2V模型: {model_id}")
             # 480P I2V模型配置
-            pipe = WanVideoPipeline.from_pretrained(
-                torch_dtype=torch.bfloat16,
-                device="cuda",
+            pipe = _create_pipeline(
                 model_configs=[
-                    ModelConfig(model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth", offload_device="cpu"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="diffusion_pytorch_model*.safetensors"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="Wan2.1_VAE.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"),
                 ],
+                vram_limit=vram_limit,
             )
         elif model_id == "Wan-AI/Wan2.2-I2V-A14B":
             print(f"正在初始化Wan2.2 I2V模型: {model_id}")
             # Wan2.2 I2V模型配置
-            pipe = WanVideoPipeline.from_pretrained(
-                torch_dtype=torch.bfloat16,
-                device="cuda",
+            pipe = _create_pipeline(
                 model_configs=[
-                    ModelConfig(model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="low_noise_model/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="high_noise_model/diffusion_pytorch_model*.safetensors"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="low_noise_model/diffusion_pytorch_model*.safetensors"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-I2V-A14B", origin_file_pattern="Wan2.1_VAE.pth"),
                 ],
+                vram_limit=vram_limit,
             )
         elif model_id == "Wan-AI/Wan2.2-Animate-14B":
             # 14B Animate模型配置（与test.py保持一致）
-            pipe = WanVideoPipeline.from_pretrained(
-                torch_dtype=torch.bfloat16,
-                device="cuda",
+            pipe = _create_pipeline(
                 model_configs=[
-                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth", offload_device="cpu"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="diffusion_pytorch_model*.safetensors"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="Wan2.1_VAE.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"),
                 ],
+                vram_limit=vram_limit,
             )
         elif model_id == "AnisoraV3.2":
             # 14B Animate模型配置（与test.py保持一致）
-            pipe = WanVideoPipeline.from_pretrained(
-                torch_dtype=torch.bfloat16,
-                device="cuda",
+            pipe = _create_pipeline(
                 model_configs=[
-                    ModelConfig(path=[
+                    build_model_config(use_disk_offload=use_disk_offload, path=[
                         "/home/arkstone/workspace/anisora-models/V3.2/high_noise_model/model_part1.safetensors",
                         "/home/arkstone/workspace/anisora-models/V3.2/high_noise_model/model_part2.safetensors",
-                    ], offload_device="cpu"),
-                    ModelConfig(path=[
+                    ]),
+                    build_model_config(use_disk_offload=use_disk_offload, path=[
                         "/home/arkstone/workspace/anisora-models/V3.2/low_noise_model/model_part1.safetensors",
                         "/home/arkstone/workspace/anisora-models/V3.2/low_noise_model/model_part2.safetensors",
-                    ], offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth", offload_device="cpu"),
+                    ]),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="Wan2.1_VAE.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"),
                 ],
+                vram_limit=vram_limit,
             )
         elif model_id == "AnisoraV3.1":
             # 14B Animate模型配置（与test.py保持一致）
-            pipe = WanVideoPipeline.from_pretrained(
-                torch_dtype=torch.bfloat16,
-                device="cuda",
+            pipe = _create_pipeline(
                 model_configs=[
-                    ModelConfig(path=[
+                    build_model_config(use_disk_offload=use_disk_offload, path=[
                         "/home/arkstone/workspace/anisora-models/V3.1/model_part1.safetensors",
                         "/home/arkstone/workspace/anisora-models/V3.1/model_part2.safetensors",
-                    ], offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
-                    ModelConfig(model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth", offload_device="cpu"),
+                    ]),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="Wan2.1_VAE.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"),
                 ],
+                vram_limit=vram_limit,
             )
-        
-        # 将GB转换为字节
-        num_persistent_param_in_dit = int(vram_limit * 1024**3)
-        pipe.enable_vram_management(num_persistent_param_in_dit=num_persistent_param_in_dit)
         
         print(f"Pipeline初始化完成，使用模型: {model_id}")
         print(f"输入模式: {input_mode}")
-        print(f"显存限制: {vram_limit}GB")
+        print(f"显存模式: {memory_mode_label}")
+        print(f"显存限制: {vram_limit if vram_limit is not None else '未限制'}GB")
     return f"Pipeline初始化完成！使用模型: {model_id} (模式: {input_mode})"
 
 
@@ -280,7 +403,7 @@ def process_video(
     width,
     num_frames,
     num_inference_steps,
-    vram_limit,
+    memory_mode,
     model_id,
     first_frame=None,
     last_frame=None,
@@ -321,11 +444,10 @@ def process_video(
         if seed < 0:
             seed = random.randint(1, 2**32 - 1)
         
-        # 自动初始化pipeline（如果还没有初始化）
-        if pipe is None:
-            status = initialize_pipeline(model_id, vram_limit)
-            if "完成" not in status:
-                return None, f"model_id初始化失败：{status}"
+        # 自动初始化pipeline；模型或显存限制变化时会重新初始化
+        status = initialize_pipeline(model_id, memory_mode)
+        if "完成" not in status:
+            return None, f"model_id初始化失败：{status}"
         
         vace_video = None
         vace_reference_image = None
@@ -506,4 +628,3 @@ def process_video(
         import traceback
         error_trace = traceback.format_exc()
         return None, f"生成过程中出现错误：{str(e)}\n\n详细错误信息：\n{error_trace}"
-

@@ -146,7 +146,10 @@ def get_task_params_summary(task_data: Dict) -> str:
     lines.append(f"- **FPS**: {params.get('fps', 'N/A')}")
     lines.append(f"- **质量**: {params.get('quality', 'N/A')}")
     lines.append(f"- **种子**: {params.get('seed', 'N/A')}")
-    lines.append(f"- **显存限制**: {params.get('vram_limit', 'N/A')} GB")
+    if "memory_mode" in params:
+        lines.append(f"- **显存模式**: {params.get('memory_mode', 'N/A')}")
+    else:
+        lines.append(f"- **显存限制**: {params.get('vram_limit', 'N/A')} GB")
     
     if params.get('prompt'):
         lines.append(f"\n### 提示词")

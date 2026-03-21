@@ -10,7 +10,8 @@ from utils.img_utils import get_image_info
 from utils.vram_utils import clear_vram, get_vram_info
 from utils.preview_utils import refresh_preview_list, load_task_preview, delete_task_files
 from utils.model_config import (
-    VACE_MODELS, INP_MODELS, ANIMATE_MODELS,
+    ANIMATE_MODELS, DEFAULT_MEMORY_MODE, INP_MODELS, MEMORY_MODE_BALANCED,
+    MEMORY_MODE_CHOICES, MEMORY_MODE_EXTREME, VACE_MODELS,
     ASPECT_RATIOS_14b, get_models_by_mode
 )
 from utils.task_queue import enqueue_task, start_task_worker, stop_task_worker, kill_worker_subprocess
@@ -496,13 +497,14 @@ def create_interface():
                             )
                         
                         with gr.Row():
-                            vram_limit = gr.Slider(
-                                label="显存占用量限制",
-                                value=48.0,
-                                minimum=0.0,
-                                maximum=200.0,
-                                step=1,
-                                info="显存占用量限制（GB），影响显存使用和性能"
+                            memory_mode = gr.Radio(
+                                label="显存模式",
+                                choices=MEMORY_MODE_CHOICES,
+                                value=DEFAULT_MEMORY_MODE,
+                                info=(
+                                    f"{MEMORY_MODE_BALANCED}：速度和显存更均衡。"
+                                    f" {MEMORY_MODE_EXTREME}：显存更省，但明显更慢。"
+                                )
                             )
                             tiled_checkbox = gr.Checkbox(
                                 label="Tiled VAE Decode", 
@@ -613,7 +615,7 @@ def create_interface():
                         width,
                         num_frames,
                         num_inference_steps,
-                        vram_limit,
+                        memory_mode,
                         model_id,
                         first_frame,
                         last_frame,
@@ -697,7 +699,9 @@ def create_interface():
         **高级参数说明**：
         - **视频帧数**：控制生成视频的长度，帧数越多视频越长
         - **推理步数**：控制生成质量，步数越多质量越高但速度越慢
-        - **显存占用量限制**：控制显存使用，数值越大显存占用越多但性能越好（0-100GB）
+        - **显存模式**：
+          - **均衡模式（推荐）**：自动预留约 2GB 缓冲，兼顾速度和显存占用
+          - **极限省显存**：使用更激进的 offload，显存更省，但速度更慢
         - **Tiled VAE Decode**：启用分块VAE解码，可提高性能但可能导致VAE错误
         
         **视频保存功能**：
@@ -720,7 +724,7 @@ def create_interface():
         - 调试中断后点击"释放显存"按钮清理显存
         - 使用"刷新显存信息"查看当前显存使用情况
         - 显存不足时建议先释放显存再重新生成
-        - 可以通过调整显存占用量限制来平衡显存使用和性能（0-100GB滑块控制）
+        - 可以通过切换显存模式在速度和显存占用之间取舍
         - 切换模型时会自动清理显存并重新初始化
         
         **使用提示**：

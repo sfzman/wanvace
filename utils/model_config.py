@@ -25,6 +25,18 @@ ANIMATE_MODELS = [
     "Wan-AI/Wan2.2-Animate-14B"
 ]
 
+MEMORY_MODE_BALANCED = "均衡模式（推荐）"
+MEMORY_MODE_EXTREME = "极限省显存"
+MEMORY_MODE_CHOICES = [
+    MEMORY_MODE_BALANCED,
+    MEMORY_MODE_EXTREME,
+]
+MEMORY_MODE_INFO = {
+    MEMORY_MODE_BALANCED: "速度和显存更均衡，自动预留约 2GB 缓冲。",
+    MEMORY_MODE_EXTREME: "使用更激进的 offload，显存更省，但明显更慢。",
+}
+DEFAULT_MEMORY_MODE = MEMORY_MODE_BALANCED
+
 ASPECT_RATIOS_14b = {
     "1:1":  (960, 960),
     "4:3":  (1104, 832),
@@ -52,4 +64,3 @@ def get_models_by_mode(mode: str) -> list[str]:
         return ANIMATE_MODELS
     else:
         return VACE_MODELS  # 默认返回VACE模型
-
