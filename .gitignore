@@ -9,3 +9,9 @@ examples/
 task_queue/
 .msc
 .mv
+
+service.log
+watchdog.log
+watchdog.sh
+.wanvace.pid
+.watchdog.lock
