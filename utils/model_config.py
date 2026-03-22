@@ -14,6 +14,7 @@ INP_MODELS = [
     "PAI/Wan2.2-Fun-A14B-InP",
     "PAI/Wan2.1-Fun-14B-InP",
     "PAI/Wan2.1-Fun-V1.1-1.3B-InP",
+    "Lightricks/LTX-2.3-I2AV-TwoStage",
     # 以下仅仅支持首帧图片，不支持尾帧图片
     "Wan-AI/Wan2.1-I2V-14B-480P",
     "Wan-AI/Wan2.2-I2V-A14B",
@@ -24,6 +25,20 @@ INP_MODELS = [
 ANIMATE_MODELS = [
     "Wan-AI/Wan2.2-Animate-14B"
 ]
+
+LTX_TWO_STAGE_MODEL = "Lightricks/LTX-2.3-I2AV-TwoStage"
+LTX_DEFAULT_FPS = 24
+LTX_DEFAULT_CFG_SCALE = 3.0
+LTX_DEFAULT_INFERENCE_STEPS = 30
+LTX_DURATION_FRAME_MAP = {
+    "6秒": 145,
+    "8秒": 193,
+    "10秒": 241,
+}
+LTX_RESOLUTION_PRESETS = {
+    "横屏 1920×1080": (1920, 1080),
+    "竖屏 1080×1920": (1080, 1920),
+}
 
 MEMORY_MODE_BALANCED = "均衡模式（推荐）"
 MEMORY_MODE_EXTREME = "极限省显存"
@@ -64,3 +79,50 @@ def get_models_by_mode(mode: str) -> list[str]:
         return ANIMATE_MODELS
     else:
         return VACE_MODELS  # 默认返回VACE模型
+
+
+def is_ltx_model(model_id: str | None) -> bool:
+    return model_id == LTX_TWO_STAGE_MODEL
+
+
+def get_ltx_duration_label(num_frames) -> str:
+    try:
+        target_frames = int(num_frames)
+    except (TypeError, ValueError):
+        return "6秒"
+    return min(
+        LTX_DURATION_FRAME_MAP,
+        key=lambda label: abs(LTX_DURATION_FRAME_MAP[label] - target_frames),
+    )
+
+
+def get_ltx_resolution_label(width, height) -> str:
+    try:
+        width = int(width)
+        height = int(height)
+    except (TypeError, ValueError):
+        return "横屏 1920×1080"
+    return "竖屏 1080×1920" if height > width else "横屏 1920×1080"
+
+
+def normalize_ltx_generation_params(model_id, fps, width, height, num_frames, tiled=None):
+    """将 LTX 参数收敛到官方推荐的固定档位。"""
+    if not is_ltx_model(model_id):
+        return {
+            "fps": int(fps) if fps is not None else 16,
+            "width": int(width) if width is not None else 832,
+            "height": int(height) if height is not None else 480,
+            "num_frames": int(num_frames) if num_frames is not None else 81,
+            "tiled": bool(tiled),
+        }
+
+    duration_label = get_ltx_duration_label(num_frames)
+    resolution_label = get_ltx_resolution_label(width, height)
+    normalized_width, normalized_height = LTX_RESOLUTION_PRESETS[resolution_label]
+    return {
+        "fps": LTX_DEFAULT_FPS,
+        "width": normalized_width,
+        "height": normalized_height,
+        "num_frames": LTX_DURATION_FRAME_MAP[duration_label],
+        "tiled": True,
+    }

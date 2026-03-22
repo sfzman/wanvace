@@ -17,7 +17,12 @@ import shutil
 import time
 from pathlib import Path
 from datetime import datetime
-from utils.model_config import DEFAULT_MEMORY_MODE, VACE_MODELS
+from utils.model_config import (
+    DEFAULT_MEMORY_MODE,
+    LTX_TWO_STAGE_MODEL,
+    VACE_MODELS,
+    normalize_ltx_generation_params,
+)
 
 # 任务队列配置
 TASK_QUEUE_DIR = Path("./task_queue").resolve()
@@ -47,7 +52,7 @@ def _worker_subprocess_fn(task_q, result_q):
     """在子进程中运行。循环接收任务、调用 process_video、回传结果。
     Pipeline 在子进程的全局变量中缓存，多次任务共享同一 pipeline。"""
     import queue as _queue_mod
-    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     while True:
         try:
             params = task_q.get(timeout=1.0)
@@ -236,10 +241,16 @@ def _task_worker_loop():
             _atomic_write_json(task_file, task)
 
             params = task.get("params", {})
+            model_id = params.get("model_id")
+            is_ltx_task = model_id == LTX_TWO_STAGE_MODEL
 
             # 确保子进程存活
             with _worker_proc_lock:
                 worker_proc = _worker_proc
+            if is_ltx_task and worker_proc is not None and worker_proc.is_alive():
+                # LTX 显存占用和碎片更敏感，按 task 隔离子进程以贴近 test.py 的单次执行行为。
+                kill_worker_subprocess()
+                worker_proc = None
             if worker_proc is None or not worker_proc.is_alive():
                 _start_worker_subprocess()
 
@@ -330,6 +341,10 @@ def _task_worker_loop():
             else:
                 print(f"[worker] 任务失败: {task_id}, 错误信息: {msg}")
 
+            if is_ltx_task:
+                # 无论成功失败都销毁 LTX 子进程，避免下一个任务复用碎片化 CUDA context。
+                kill_worker_subprocess()
+
             task["result"] = {
                 "output_video": out_path,
                 "message": msg,
@@ -403,6 +418,15 @@ def enqueue_task(
     if not negative_prompt:
         negative_prompt = "色调艳丽，过曝，细节模糊不清"
     try:
+        normalized_generation = normalize_ltx_generation_params(
+            model_id=model_id,
+            fps=fps,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            tiled=tiled,
+        )
+
         _ensure_task_dirs()
         task_id = str(uuid.uuid4())
         task_dir = TASK_QUEUE_DIR / task_id
@@ -422,17 +446,17 @@ def enqueue_task(
             "prompt": prompt,
             "negative_prompt": negative_prompt,
             "seed": int(seed) if seed is not None else -1,
-            "fps": int(fps) if fps is not None else 16,
+            "fps": normalized_generation["fps"],
             "quality": int(quality) if quality is not None else 8,
-            "height": int(height) if height is not None else 480,
-            "width": int(width) if width is not None else 832,
-            "num_frames": int(num_frames) if num_frames is not None else 81,
+            "height": normalized_generation["height"],
+            "width": normalized_generation["width"],
+            "num_frames": normalized_generation["num_frames"],
             "num_inference_steps": int(num_inference_steps) if num_inference_steps is not None else 40,
             "memory_mode": memory_mode or DEFAULT_MEMORY_MODE,
             "model_id": model_id,
             "first_frame": first_frame_path,
             "last_frame": last_frame_path,
-            "tiled": bool(tiled),
+            "tiled": normalized_generation["tiled"],
             "animate_reference_image": animate_reference_image_path,
             "template_video": template_video_path,
             "save_folder_path": save_folder_path or "./outputs",

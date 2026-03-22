@@ -12,11 +12,22 @@ from utils.preview_utils import refresh_preview_list, load_task_preview, delete_
 from utils.model_config import (
     ANIMATE_MODELS, DEFAULT_MEMORY_MODE, INP_MODELS, MEMORY_MODE_BALANCED,
     MEMORY_MODE_CHOICES, MEMORY_MODE_EXTREME, VACE_MODELS,
-    ASPECT_RATIOS_14b, get_models_by_mode
+    ASPECT_RATIOS_14b, LTX_DEFAULT_CFG_SCALE, LTX_DEFAULT_FPS,
+    LTX_DEFAULT_INFERENCE_STEPS, LTX_DURATION_FRAME_MAP, LTX_RESOLUTION_PRESETS,
+    get_models_by_mode, is_ltx_model
 )
 from utils.task_queue import enqueue_task, start_task_worker, stop_task_worker, kill_worker_subprocess
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+DEFAULT_ASPECT_RATIO = "16:9"
+DEFAULT_FPS_INFO = ""
+DEFAULT_WIDTH_INFO = "视频宽度（像素）"
+DEFAULT_HEIGHT_INFO = "视频高度（像素）"
+DEFAULT_NUM_FRAMES_INFO = "视频总帧数，建议时长（秒）*FPS+1"
+DEFAULT_STEPS_INFO = "推理步数，步数越多质量越高但速度越慢"
+DEFAULT_CFG_INFO = "Classifier-Free Guidance 缩放因子，控制生成结果与提示词的匹配程度"
+DEFAULT_TILED_INFO = "是否启用 VAE 分块推理。设置为 `True` 时可显著减少 VAE 编解码阶段的显存占用，会产生少许误差，以及少量推理时间延长。"
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +125,64 @@ def update_size_display(aspect_ratio):
     
     info_text = f"选择预设的宽高比，系统会自动计算对应的尺寸\n当前尺寸: {size_text}"
     return gr.Dropdown(info=info_text)
+
+
+def get_aspect_ratio_info(aspect_ratio):
+    if aspect_ratio in ASPECT_RATIOS_14b:
+        width, height = ASPECT_RATIOS_14b[aspect_ratio]
+        size_text = f"{width} × {height}"
+    else:
+        size_text = "832 × 480"
+    return f"选择预设的宽高比，系统会自动计算对应的尺寸\n当前尺寸: {size_text}"
+
+
+def update_ltx_duration(duration_label):
+    """根据 LTX 官方时长档位更新帧数。"""
+    return gr.update(value=LTX_DURATION_FRAME_MAP.get(duration_label, LTX_DURATION_FRAME_MAP["6秒"]))
+
+
+def update_ltx_resolution(resolution_label):
+    """根据 LTX 官方分辨率档位更新宽高。"""
+    width, height = LTX_RESOLUTION_PRESETS.get(
+        resolution_label,
+        LTX_RESOLUTION_PRESETS["横屏 1920×1080"],
+    )
+    return (
+        gr.update(value=width, minimum=1080, maximum=1920, step=64),
+        gr.update(value=height, minimum=1080, maximum=1920, step=64),
+    )
+
+
+def configure_model_controls(model_id):
+    """根据模型类型切换 UI 控件的默认值和可编辑状态。"""
+    if is_ltx_model(model_id):
+        return (
+            gr.update(visible=True),
+            gr.update(value="6秒"),
+            gr.update(value="横屏 1920×1080"),
+            gr.update(value=LTX_DEFAULT_FPS, minimum=LTX_DEFAULT_FPS, maximum=LTX_DEFAULT_FPS, step=1, interactive=False, info="LTX 两阶段模型固定使用 24 FPS"),
+            gr.update(value=1920, minimum=1080, maximum=1920, step=64, interactive=False, info="LTX 官方仅支持 1920×1080 或 1080×1920"),
+            gr.update(value=1080, minimum=1080, maximum=1920, step=64, interactive=False, info="LTX 官方仅支持 1920×1080 或 1080×1920"),
+            gr.update(value=LTX_DURATION_FRAME_MAP["6秒"], minimum=LTX_DURATION_FRAME_MAP["6秒"], maximum=LTX_DURATION_FRAME_MAP["10秒"], step=1, interactive=False, info="LTX 官方仅支持 6秒 / 8秒 / 10秒"),
+            gr.update(value=LTX_DEFAULT_INFERENCE_STEPS, minimum=1, maximum=100, step=1, interactive=True, info="LTX pipeline 默认 30 步，步数越多质量越高但速度越慢"),
+            gr.update(value=LTX_DEFAULT_CFG_SCALE, minimum=1.0, maximum=20.0, step=0.5, interactive=True, info="LTX pipeline 默认 CFG Scale 为 3.0"),
+            gr.update(value=DEFAULT_ASPECT_RATIO, interactive=False, info="LTX 分辨率由下方“LTX 官方参数”控制"),
+            gr.update(value=True, interactive=False, info="LTX 两阶段模型固定启用 Tiled VAE Decode"),
+        )
+
+    return (
+        gr.update(visible=False),
+        gr.update(value="6秒"),
+        gr.update(value="横屏 1920×1080"),
+        gr.update(value=16, minimum=1, maximum=60, step=1, interactive=True, info=DEFAULT_FPS_INFO),
+        gr.update(value=1280, minimum=256, maximum=1280, step=64, interactive=True, info=DEFAULT_WIDTH_INFO),
+        gr.update(value=720, minimum=256, maximum=1280, step=64, interactive=True, info=DEFAULT_HEIGHT_INFO),
+        gr.update(value=81, minimum=16, maximum=256, step=1, interactive=True, info=DEFAULT_NUM_FRAMES_INFO),
+        gr.update(value=8, minimum=1, maximum=100, step=1, interactive=True, info=DEFAULT_STEPS_INFO),
+        gr.update(value=1.0, minimum=1.0, maximum=20.0, step=0.5, interactive=True, info=DEFAULT_CFG_INFO),
+        gr.update(value=DEFAULT_ASPECT_RATIO, interactive=True, info=get_aspect_ratio_info(DEFAULT_ASPECT_RATIO)),
+        gr.update(value=False, interactive=True, info=DEFAULT_TILED_INFO),
+    )
 
 
 def create_preview_tab():
@@ -280,7 +349,7 @@ def create_interface():
     """创建Gradio界面"""
     with gr.Blocks(title="WanVACE 视频生成器", theme=gr.themes.Soft()) as demo:
         gr.Markdown("# 🎬 WanVACE 视频生成器")
-        gr.Markdown("使用Wan2.1-VACE-14B模型生成高质量视频")
+        gr.Markdown("使用 Wan / LTX 模型生成高质量视频")
         
         # 主Tabs：视频生成和视频预览
         with gr.Tabs() as main_tabs:
@@ -405,6 +474,22 @@ def create_interface():
                                 maximum=60,
                                 step=1
                             )
+
+                        with gr.Group(visible=False) as ltx_controls:
+                            gr.Markdown("### 🎞️ LTX 官方参数")
+                            with gr.Row():
+                                ltx_duration = gr.Radio(
+                                    label="视频时长",
+                                    choices=list(LTX_DURATION_FRAME_MAP.keys()),
+                                    value="6秒",
+                                    info="LTX 官方固定档位：6秒 / 8秒 / 10秒"
+                                )
+                                ltx_resolution = gr.Radio(
+                                    label="视频分辨率",
+                                    choices=list(LTX_RESOLUTION_PRESETS.keys()),
+                                    value="横屏 1920×1080",
+                                    info="LTX 官方固定分辨率：仅支持横竖屏 1080P"
+                                )
                         
                         # 视频尺寸设置
                         gr.Markdown("### 📐 视频尺寸设置")
@@ -532,9 +617,45 @@ def create_interface():
                         )
         
                 # Tab切换时更新模型选择
-                input_tabs.select(
+                tab_change_event = input_tabs.select(
                     fn=handle_tab_change,
                     outputs=[model_id]
+                )
+
+                tab_change_event.then(
+                    fn=configure_model_controls,
+                    inputs=[model_id],
+                    outputs=[
+                        ltx_controls,
+                        ltx_duration,
+                        ltx_resolution,
+                        fps,
+                        width,
+                        height,
+                        num_frames,
+                        num_inference_steps,
+                        cfg_scale,
+                        aspect_ratio,
+                        tiled_checkbox,
+                    ]
+                )
+
+                model_id.change(
+                    fn=configure_model_controls,
+                    inputs=[model_id],
+                    outputs=[
+                        ltx_controls,
+                        ltx_duration,
+                        ltx_resolution,
+                        fps,
+                        width,
+                        height,
+                        num_frames,
+                        num_inference_steps,
+                        cfg_scale,
+                        aspect_ratio,
+                        tiled_checkbox,
+                    ]
                 )
                 
                 # 宽高比选择变化时自动更新尺寸和显示
@@ -549,6 +670,18 @@ def create_interface():
                     fn=update_size_display,
                     inputs=[aspect_ratio],
                     outputs=[aspect_ratio]
+                )
+
+                ltx_duration.change(
+                    fn=update_ltx_duration,
+                    inputs=[ltx_duration],
+                    outputs=[num_frames]
+                )
+
+                ltx_resolution.change(
+                    fn=update_ltx_resolution,
+                    inputs=[ltx_resolution],
+                    outputs=[width, height]
                 )
                 
                 # 视频上传时自动更新视频信息
@@ -642,9 +775,10 @@ def create_interface():
         - **🎬 VACE模式标签页**：显示VACE模型
           - **PAI/Wan2.2-VACE-Fun-A14B**：高质量VACE模型，生成效果更好，但需要更多显存和计算时间
           - **Wan-AI/Wan2.1-VACE-1.3B**：轻量级VACE模型，生成速度更快，显存需求更少，适合快速测试
-        - **🖼️ 首尾帧模式标签页**：显示InP模型
+        - **🖼️ 首尾帧模式标签页**：显示InP / LTX模型
           - **PAI/Wan2.2-Fun-A14B-InP**：高质量首尾帧模型，14B参数
           - **PAI/Wan2.1-Fun-V1.1-1.3B-InP**：轻量级首尾帧模型，1.3B参数
+          - **Lightricks/LTX-2.3-I2AV-TwoStage**：LTX 两阶段首尾帧模型，支持首帧与尾帧联合约束；固定 24FPS，只支持 6秒 / 8秒 / 10秒 和 1080P 横竖屏
         - **🎭 Animate模式标签页**：显示Animate模型
           - **Wan-AI/Wan2.2-Animate-14B**：高质量Animate模型，14B参数，用于基于参考图片和模板视频生成动画
         
@@ -666,7 +800,7 @@ def create_interface():
         **智能模型切换**：
         - 切换标签页时，模型选择会自动更新为对应模式的模型
         - VACE模式标签页只显示VACE模型（Wan-AI/Wan2.1-VACE-*）
-        - 首尾帧模式标签页只显示InP模型（PAI/Wan2.1-Fun-V1.1-*-InP）
+        - 首尾帧模式标签页只显示InP / LTX模型
         - Animate模式标签页只显示Animate模型（Wan-AI/Wan2.2-Animate-14B）
         - 系统会自动选择每个模式的默认模型（14B版本）
         
@@ -684,6 +818,8 @@ def create_interface():
         **注意事项**：
         - VACE模式：至少需要上传深度视频或参考图片中的一种
         - 首尾帧模式：必须上传首帧图片，尾帧图片可选
+        - LTX 两阶段模型会把尾帧作为 `num_frames - 1` 位置约束；未上传尾帧时会自动退化为仅首帧约束
+        - LTX 两阶段模型会自动锁定为官方推荐参数：24FPS、6秒 / 8秒 / 10秒、1920×1080 或 1080×1920，并固定启用 Tiled VAE Decode
         - Animate模式：必须上传参考图片和模板视频
         - 首次生成时会自动初始化模型，请耐心等待
         - Animate模式的预处理过程需要额外时间（通常1-3分钟），请耐心等待
@@ -699,6 +835,7 @@ def create_interface():
         **高级参数说明**：
         - **视频帧数**：控制生成视频的长度，帧数越多视频越长
         - **推理步数**：控制生成质量，步数越多质量越高但速度越慢
+          - LTX 默认会切换到 pipeline 推荐值：30 步
         - **显存模式**：
           - **均衡模式（推荐）**：自动预留约 2GB 缓冲，兼顾速度和显存占用
           - **极限省显存**：使用更激进的 offload，显存更省，但速度更慢
@@ -731,6 +868,7 @@ def create_interface():
         - 根据您的需求选择合适的标签页
         - VACE模式标签页适合有深度视频或参考图片的场景
         - 首尾帧模式标签页适合有起始和结束图片的场景
+        - 如果使用 LTX，优先保持界面给出的官方档位，不要再手动改成 16FPS、低分辨率或任意帧数
         - Animate模式标签页适合有参考图片和模板视频的场景，可以生成基于模板运动的动画
         - 系统会根据标签页自动显示相应的输入界面和模型选项
         - 切换标签页时会自动更新模型选择，无需手动调整

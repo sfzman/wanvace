@@ -3,7 +3,7 @@
 包含视频生成、pipeline初始化、模板视频预处理等核心逻辑
 """
 import os
-os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import random
 import torch
@@ -25,15 +25,23 @@ except ImportError:
     # 兼容旧版本模块名
     from diffsynth.pipelines.wan_video_new import WanVideoPipeline, ModelConfig
 
+try:
+    from diffsynth.pipelines.ltx2_audio_video import LTX2AudioVideoPipeline
+    from diffsynth.utils.data.media_io_ltx2 import write_video_audio_ltx2
+except ImportError:
+    LTX2AudioVideoPipeline = None
+    write_video_audio_ltx2 = None
+
 from utils.video_utils import clean_temp_videos, reencode_video_to_16fps
 from utils.vram_utils import clear_vram
 from utils.model_config import (
     ANIMATE_MODELS, DEFAULT_MEMORY_MODE, INP_MODELS, MEMORY_MODE_BALANCED,
-    MEMORY_MODE_EXTREME, VACE_MODELS
+    MEMORY_MODE_EXTREME, VACE_MODELS, LTX_TWO_STAGE_MODEL, is_ltx_model,
+    normalize_ltx_generation_params
 )
 
 # 全局变量存储pipeline和模型选择
-pipe: WanVideoPipeline = None
+pipe = None
 selected_model = "PAI/Wan2.2-VACE-Fun-A14B"  # 默认选择14B模型
 selected_memory_mode = None  # 记录当前pipeline使用的显存模式
 selected_vram_limit = None  # 记录当前pipeline使用的显存限制
@@ -45,6 +53,12 @@ def get_auto_vram_limit():
     """自动计算显存管理阈值：总显存减去约 2GB 缓冲。"""
     total_vram_gb = torch.cuda.mem_get_info("cuda")[1] / (1024 ** 3)
     return max(total_vram_gb - 2.0, 0.0)
+
+
+def get_ltx_vram_limit():
+    """LTX 参考测试脚本使用更紧的缓冲，尽量贴近其显存行为。"""
+    total_vram_gb = torch.cuda.mem_get_info("cuda")[1] / (1024 ** 3)
+    return max(total_vram_gb - 0.5, 0.0)
 
 
 def normalize_vram_limit(vram_limit):
@@ -132,6 +146,32 @@ def build_model_config(use_disk_offload=False, **kwargs):
         computation_device="cuda",
         **kwargs,
     )
+def build_ltx_model_config(use_disk_offload=False, **kwargs):
+    # LTX 在当前环境下采用 test.py 同类的低显存配置；
+    # 即使在“均衡模式”下也保持 CPU onload/offload，避免初始化直接 OOM。
+    if hasattr(torch, "float8_e5m2"):
+        return ModelConfig(
+            offload_dtype=torch.float8_e5m2,
+            offload_device="cpu",
+            onload_dtype=torch.float8_e5m2,
+            onload_device="cpu",
+            preparing_dtype=torch.float8_e5m2,
+            preparing_device="cuda",
+            computation_dtype=torch.bfloat16,
+            computation_device="cuda",
+            **kwargs,
+        )
+    return ModelConfig(
+        offload_dtype=torch.bfloat16,
+        offload_device="cpu",
+        onload_dtype=torch.bfloat16,
+        onload_device="cpu",
+        preparing_dtype=torch.bfloat16,
+        preparing_device="cuda",
+        computation_dtype=torch.bfloat16,
+        computation_device="cuda",
+        **kwargs,
+    )
 
 
 def _create_pipeline(model_configs, vram_limit):
@@ -140,6 +180,56 @@ def _create_pipeline(model_configs, vram_limit):
         device="cuda",
         model_configs=model_configs,
         vram_limit=vram_limit,
+    )
+
+
+def _create_ltx_pipeline(vram_limit, use_disk_offload):
+    if LTX2AudioVideoPipeline is None:
+        raise RuntimeError("当前 DiffSynth 版本未包含 LTX2AudioVideoPipeline，请先更新 DiffSynth-Studio。")
+
+    return LTX2AudioVideoPipeline.from_pretrained(
+        torch_dtype=torch.bfloat16,
+        device="cuda",
+        model_configs=[
+            build_ltx_model_config(
+                model_id="google/gemma-3-12b-it-qat-q4_0-unquantized",
+                origin_file_pattern="model-*.safetensors",
+            ),
+            build_ltx_model_config(
+                model_id="DiffSynth-Studio/LTX-2.3-Repackage",
+                origin_file_pattern="transformer.safetensors",
+            ),
+            build_ltx_model_config(
+                model_id="DiffSynth-Studio/LTX-2.3-Repackage",
+                origin_file_pattern="text_encoder_post_modules.safetensors",
+            ),
+            build_ltx_model_config(
+                model_id="DiffSynth-Studio/LTX-2.3-Repackage",
+                origin_file_pattern="video_vae_decoder.safetensors",
+            ),
+            build_ltx_model_config(
+                model_id="DiffSynth-Studio/LTX-2.3-Repackage",
+                origin_file_pattern="audio_vae_decoder.safetensors",
+            ),
+            build_ltx_model_config(
+                model_id="DiffSynth-Studio/LTX-2.3-Repackage",
+                origin_file_pattern="audio_vocoder.safetensors",
+            ),
+            build_ltx_model_config(
+                model_id="DiffSynth-Studio/LTX-2.3-Repackage",
+                origin_file_pattern="video_vae_encoder.safetensors",
+            ),
+            build_ltx_model_config(
+                model_id="Lightricks/LTX-2.3",
+                origin_file_pattern="ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+            ),
+        ],
+        tokenizer_config=ModelConfig(model_id="google/gemma-3-12b-it-qat-q4_0-unquantized"),
+        stage2_lora_config=ModelConfig(
+            model_id="Lightricks/LTX-2.3",
+            origin_file_pattern="ltx-2.3-22b-distilled-lora-384.safetensors",
+        ),
+        vram_limit=get_ltx_vram_limit(),
     )
 
 
@@ -273,7 +363,12 @@ def initialize_pipeline(model_id="PAI/Wan2.2-VACE-Fun-A14B", memory_mode=DEFAULT
         else:
             input_mode = "vace"
         
-        if model_id == "PAI/Wan2.2-VACE-Fun-A14B":
+        if is_ltx_model(model_id):
+            pipe = _create_ltx_pipeline(
+                vram_limit=vram_limit,
+                use_disk_offload=use_disk_offload,
+            )
+        elif model_id == "PAI/Wan2.2-VACE-Fun-A14B":
             # 14B VACE模型配置
             pipe = _create_pipeline(
                 model_configs=[
@@ -417,9 +512,24 @@ def process_video(
     """处理视频生成"""
     global pipe, last_used_model
     try:
+        normalized_generation = normalize_ltx_generation_params(
+            model_id=model_id,
+            fps=fps,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            tiled=tiled,
+        )
+        fps = normalized_generation["fps"]
+        width = normalized_generation["width"]
+        height = normalized_generation["height"]
+        num_frames = normalized_generation["num_frames"]
+        tiled = normalized_generation["tiled"]
+
         # 根据模型类型判断输入模式
         is_inp_mode = model_id in INP_MODELS
         is_animate_mode = "Animate" in model_id
+        is_ltx_inp_mode = is_ltx_model(model_id)
         
         if is_inp_mode:
             # InP模式：需要首帧，尾帧可选
@@ -459,7 +569,7 @@ def process_video(
         
         if not negative_prompt:
             negative_prompt = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
-        
+
         if is_inp_mode:
             # InP模式：处理首尾帧
             if has_first_frame:
@@ -478,21 +588,46 @@ def process_video(
                     else:
                         last_frame_img = last_frame.resize((width, height)).convert("RGB")
                 
-                # 调用InP模型的pipeline
-                video = pipe(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    input_image=first_frame_img,
-                    end_image=last_frame_img,
-                    seed=seed,
-                    tiled=tiled,
-                    height=height,
-                    width=width,
-                    num_frames=num_frames,
-                    num_inference_steps=num_inference_steps,
-                    cfg_scale=cfg_scale,
-                    sigma_shift=sigma_shift,
-                )
+                if is_ltx_inp_mode:
+                    input_images = [first_frame_img]
+                    input_images_indexes = [0]
+                    if last_frame_img is not None:
+                        input_images.append(last_frame_img)
+                        input_images_indexes.append(num_frames - 1)
+
+                    video, audio = pipe(
+                        prompt=prompt,
+                        negative_prompt=negative_prompt,
+                        seed=seed,
+                        height=height,
+                        width=width,
+                        num_frames=num_frames,
+                        frame_rate=fps,
+                        tiled=tiled,
+                        cfg_scale=cfg_scale,
+                        num_inference_steps=num_inference_steps,
+                        use_two_stage_pipeline=True,
+                        clear_lora_before_state_two=True,
+                        input_images=input_images,
+                        input_images_indexes=input_images_indexes,
+                        input_images_strength=1.0,
+                    )
+                else:
+                    # 调用InP模型的pipeline
+                    video = pipe(
+                        prompt=prompt,
+                        negative_prompt=negative_prompt,
+                        input_image=first_frame_img,
+                        end_image=last_frame_img,
+                        seed=seed,
+                        tiled=tiled,
+                        height=height,
+                        width=width,
+                        num_frames=num_frames,
+                        num_inference_steps=num_inference_steps,
+                        cfg_scale=cfg_scale,
+                        sigma_shift=sigma_shift,
+                    )
             else:
                 return None, "首尾帧模式需要上传首帧图片"
         elif is_animate_mode:
@@ -606,7 +741,21 @@ def process_video(
         
         timestamp = int(time.time())
         output_path = f"output_video_{seed}_{timestamp}.mp4"
-        save_video(video, output_path, fps=fps, quality=quality)
+        if is_ltx_inp_mode:
+            audio_sample_rate = None
+            if audio is not None and hasattr(pipe, "audio_vocoder"):
+                audio_sample_rate = getattr(pipe.audio_vocoder, "output_sampling_rate", None)
+            write_video_audio_ltx2(
+                video=video,
+                audio=audio,
+                output_path=output_path,
+                fps=fps,
+                audio_sample_rate=audio_sample_rate,
+            )
+            if hasattr(pipe, "clear_lora"):
+                pipe.clear_lora(verbose=0)
+        else:
+            save_video(video, output_path, fps=fps, quality=quality)
 
         print("cleaning temp videos...")
         clean_temp_videos()
