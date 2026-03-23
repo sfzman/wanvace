@@ -54,6 +54,30 @@ ANISORA_V31_DIR = os.path.join(ANISORA_ROOT, "V3.1")
 ANISORA_V32_DIR = os.path.join(ANISORA_ROOT, "V3.2")
 
 
+def set_wan_ditblock_vram_wrapper(use_safe_wrapper=False):
+    """按模型切换 Wan DiTBlock 的显存包装器，规避 AniSora V3.2 在 720p 下的黑屏回归。"""
+    try:
+        from diffsynth.configs.vram_management_module_maps import VRAM_MANAGEMENT_MODULE_MAPS
+    except ImportError:
+        return
+
+    model_key = "diffsynth.models.wan_video_dit.WanModel"
+    block_key = "diffsynth.models.wan_video_dit.DiTBlock"
+    wrapper = (
+        "diffsynth.core.vram.layers.AutoWrappedModule"
+        if use_safe_wrapper
+        else "diffsynth.core.vram.layers.AutoWrappedNonRecurseModule"
+    )
+
+    if model_key not in VRAM_MANAGEMENT_MODULE_MAPS:
+        return
+    if VRAM_MANAGEMENT_MODULE_MAPS[model_key].get(block_key) == wrapper:
+        return
+
+    VRAM_MANAGEMENT_MODULE_MAPS[model_key][block_key] = wrapper
+    print(f"Wan DiTBlock VRAM wrapper已切换为: {wrapper}")
+
+
 def get_auto_vram_limit():
     """自动计算显存管理阈值：总显存减去约 2GB 缓冲。"""
     total_vram_gb = torch.cuda.mem_get_info("cuda")[1] / (1024 ** 3)
@@ -393,6 +417,7 @@ def initialize_pipeline(model_id="PAI/Wan2.2-VACE-Fun-A14B", memory_mode=DEFAULT
         selected_model = model_id
         selected_memory_mode = memory_mode_key
         selected_vram_limit = vram_limit
+        set_wan_ditblock_vram_wrapper(use_safe_wrapper=(model_id == "AnisoraV3.2"))
         
         # 根据模型类型设置输入模式
         if model_id in INP_MODELS:
