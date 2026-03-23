@@ -11,6 +11,7 @@ import gc
 import shutil
 import tempfile
 import time
+import numpy as np
 from PIL import Image
 
 try:
@@ -36,8 +37,8 @@ from utils.video_utils import clean_temp_videos, reencode_video_to_16fps
 from utils.vram_utils import clear_vram
 from utils.model_config import (
     ANIMATE_MODELS, DEFAULT_MEMORY_MODE, INP_MODELS, MEMORY_MODE_BALANCED,
-    MEMORY_MODE_EXTREME, VACE_MODELS, LTX_TWO_STAGE_MODEL, is_ltx_model,
-    normalize_ltx_generation_params
+    MEMORY_MODE_EXTREME, VACE_MODELS, LTX_TWO_STAGE_MODEL, get_default_cfg_scale,
+    is_animate_model, is_ltx_model, normalize_ltx_generation_params
 )
 
 # 全局变量存储pipeline和模型选择
@@ -47,6 +48,10 @@ selected_memory_mode = None  # 记录当前pipeline使用的显存模式
 selected_vram_limit = None  # 记录当前pipeline使用的显存限制
 input_mode = "vace"  # 默认输入模式：vace（深度视频+参考图片）或 inp（首尾帧）
 last_used_model = None  # 记录上一次处理时使用的模型，用于判断是否需要清理显存
+
+ANISORA_ROOT = "/home/arkstone/workspace/anisora-models"
+ANISORA_V31_DIR = os.path.join(ANISORA_ROOT, "V3.1")
+ANISORA_V32_DIR = os.path.join(ANISORA_ROOT, "V3.2")
 
 
 def get_auto_vram_limit():
@@ -233,6 +238,40 @@ def _create_ltx_pipeline(vram_limit, use_disk_offload):
     )
 
 
+def analyze_video_frames(video):
+    """输出视频帧统计，帮助区分“推理全黑”和“保存失败”."""
+    if video is None:
+        return {"frame_count": 0, "all_black": False, "mean": None, "min": None, "max": None}
+
+    try:
+        frame_count = len(video)
+    except TypeError:
+        video = list(video)
+        frame_count = len(video)
+
+    if frame_count == 0:
+        return {"frame_count": 0, "all_black": False, "mean": None, "min": None, "max": None}
+
+    sample_indexes = sorted({0, frame_count // 2, frame_count - 1})
+    sample_frames = []
+    for idx in sample_indexes:
+        frame = np.asarray(video[idx])
+        sample_frames.append(frame)
+
+    stacked = np.stack(sample_frames, axis=0)
+    min_value = int(stacked.min())
+    max_value = int(stacked.max())
+    mean_value = float(stacked.mean())
+    all_black = max_value == 0
+    return {
+        "frame_count": frame_count,
+        "all_black": all_black,
+        "mean": mean_value,
+        "min": min_value,
+        "max": max_value,
+    }
+
+
 def preprocess_template_video(template_video_path, reference_image_path, width, height, num_frames):
     """预处理模板视频，生成pose和face视频"""
     try:
@@ -358,7 +397,7 @@ def initialize_pipeline(model_id="PAI/Wan2.2-VACE-Fun-A14B", memory_mode=DEFAULT
         # 根据模型类型设置输入模式
         if model_id in INP_MODELS:
             input_mode = "inp"
-        elif "Animate" in model_id:
+        elif is_animate_model(model_id):
             input_mode = "animate"
         else:
             input_mode = "vace"
@@ -447,34 +486,33 @@ def initialize_pipeline(model_id="PAI/Wan2.2-VACE-Fun-A14B", memory_mode=DEFAULT
                 vram_limit=vram_limit,
             )
         elif model_id == "AnisoraV3.2":
-            # 14B Animate模型配置（与test.py保持一致）
+            # AniSora V3.2 结构对齐 Wan2.2 I2V，优先使用模型目录自带的 T5 / VAE 文件。
             pipe = _create_pipeline(
                 model_configs=[
                     build_model_config(use_disk_offload=use_disk_offload, path=[
-                        "/home/arkstone/workspace/anisora-models/V3.2/high_noise_model/model_part1.safetensors",
-                        "/home/arkstone/workspace/anisora-models/V3.2/high_noise_model/model_part2.safetensors",
+                        os.path.join(ANISORA_V32_DIR, "high_noise_model", "model_part1.safetensors"),
+                        os.path.join(ANISORA_V32_DIR, "high_noise_model", "model_part2.safetensors"),
                     ]),
                     build_model_config(use_disk_offload=use_disk_offload, path=[
-                        "/home/arkstone/workspace/anisora-models/V3.2/low_noise_model/model_part1.safetensors",
-                        "/home/arkstone/workspace/anisora-models/V3.2/low_noise_model/model_part2.safetensors",
+                        os.path.join(ANISORA_V32_DIR, "low_noise_model", "model_part1.safetensors"),
+                        os.path.join(ANISORA_V32_DIR, "low_noise_model", "model_part2.safetensors"),
                     ]),
-                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth"),
-                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="Wan2.1_VAE.pth"),
-                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, path=os.path.join(ANISORA_V32_DIR, "models_t5_umt5-xxl-enc-bf16.pth")),
+                    build_model_config(use_disk_offload=use_disk_offload, path=os.path.join(ANISORA_V32_DIR, "Wan2.1_VAE.pth")),
                 ],
                 vram_limit=vram_limit,
             )
         elif model_id == "AnisoraV3.1":
-            # 14B Animate模型配置（与test.py保持一致）
+            # AniSora V3.1 结构更接近 Wan2.1 Fun InP，使用模型目录自带的配套组件。
             pipe = _create_pipeline(
                 model_configs=[
                     build_model_config(use_disk_offload=use_disk_offload, path=[
-                        "/home/arkstone/workspace/anisora-models/V3.1/model_part1.safetensors",
-                        "/home/arkstone/workspace/anisora-models/V3.1/model_part2.safetensors",
+                        os.path.join(ANISORA_V31_DIR, "model_part1.safetensors"),
+                        os.path.join(ANISORA_V31_DIR, "model_part2.safetensors"),
                     ]),
-                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth"),
-                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="Wan2.1_VAE.pth"),
-                    build_model_config(use_disk_offload=use_disk_offload, model_id="Wan-AI/Wan2.2-Animate-14B", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"),
+                    build_model_config(use_disk_offload=use_disk_offload, path=os.path.join(ANISORA_V31_DIR, "models_t5_umt5-xxl-enc-bf16.pth")),
+                    build_model_config(use_disk_offload=use_disk_offload, path=os.path.join(ANISORA_V31_DIR, "Wan2.1_VAE.pth")),
+                    build_model_config(use_disk_offload=use_disk_offload, path=os.path.join(ANISORA_V31_DIR, "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth")),
                 ],
                 vram_limit=vram_limit,
             )
@@ -506,7 +544,7 @@ def process_video(
     animate_reference_image=None,
     template_video=None,
     save_folder_path="./outputs",
-    cfg_scale=1.0,
+    cfg_scale=None,
     sigma_shift=5.0
 ):
     """处理视频生成"""
@@ -528,7 +566,7 @@ def process_video(
 
         # 根据模型类型判断输入模式
         is_inp_mode = model_id in INP_MODELS
-        is_animate_mode = "Animate" in model_id
+        is_animate_mode = is_animate_model(model_id)
         is_ltx_inp_mode = is_ltx_model(model_id)
         
         if is_inp_mode:
@@ -553,6 +591,9 @@ def process_video(
         
         if seed < 0:
             seed = random.randint(1, 2**32 - 1)
+
+        if cfg_scale is None:
+            cfg_scale = get_default_cfg_scale(model_id)
         
         # 自动初始化pipeline；模型或显存限制变化时会重新初始化
         status = initialize_pipeline(model_id, memory_mode)
@@ -568,7 +609,7 @@ def process_video(
             prompt = "两只可爱的橘猫戴上拳击手套，站在一个拳击台上搏斗。"
         
         if not negative_prompt:
-            negative_prompt = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+            negative_prompt = "过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
 
         if is_inp_mode:
             # InP模式：处理首尾帧
@@ -741,6 +782,15 @@ def process_video(
         
         timestamp = int(time.time())
         output_path = f"output_video_{seed}_{timestamp}.mp4"
+        video_stats = analyze_video_frames(video)
+        print(
+            "生成结果统计: "
+            f"frames={video_stats['frame_count']}, "
+            f"mean={video_stats['mean']}, "
+            f"min={video_stats['min']}, "
+            f"max={video_stats['max']}, "
+            f"all_black={video_stats['all_black']}"
+        )
         if is_ltx_inp_mode:
             audio_sample_rate = None
             if audio is not None and hasattr(pipe, "audio_vocoder"):
@@ -771,6 +821,8 @@ def process_video(
         last_used_model = model_id
         
         # 不再在此处保存/复制；统一由后台线程在任务成功后剪切
+        if video_stats["all_black"]:
+            return output_path, f"视频生成完成，但输出帧全黑，已保存为 {output_path}。这通常说明推理阶段异常，不是保存阶段异常。"
         return output_path, f"视频生成成功！已保存为 {output_path}"
         
     except Exception as e:

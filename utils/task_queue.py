@@ -21,6 +21,7 @@ from utils.model_config import (
     DEFAULT_MEMORY_MODE,
     LTX_TWO_STAGE_MODEL,
     VACE_MODELS,
+    get_default_cfg_scale,
     normalize_ltx_generation_params,
 )
 
@@ -87,7 +88,7 @@ def _worker_subprocess_fn(task_q, result_q):
                 params.get("animate_reference_image"),
                 params.get("template_video"),
                 "",  # 传空以跳过 process_video 中的复制保存
-                params.get("cfg_scale", 1.0),
+                params.get("cfg_scale", get_default_cfg_scale(params.get("model_id", _vm[0]))),
                 params.get("sigma_shift", 5.0),
             )
             result_q.put(("ok", out_path, msg))
@@ -410,13 +411,13 @@ def enqueue_task(
     animate_reference_image,
     template_video,
     save_folder_path,
-    cfg_scale=1.0,
+    cfg_scale=None,
     sigma_shift=5.0
 ):
     """将当前生成请求持久化为任务文件并入队（立即返回）。"""
 
     if not negative_prompt:
-        negative_prompt = "色调艳丽，过曝，细节模糊不清"
+        negative_prompt = "发灰，字幕，过曝，细节模糊不清"
     try:
         normalized_generation = normalize_ltx_generation_params(
             model_id=model_id,
@@ -460,7 +461,7 @@ def enqueue_task(
             "animate_reference_image": animate_reference_image_path,
             "template_video": template_video_path,
             "save_folder_path": save_folder_path or "./outputs",
-            "cfg_scale": float(cfg_scale) if cfg_scale is not None else 1.0,
+            "cfg_scale": float(cfg_scale) if cfg_scale is not None else get_default_cfg_scale(model_id),
             "sigma_shift": float(sigma_shift) if sigma_shift is not None else 5.0,
         }
 

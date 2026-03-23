@@ -26,7 +26,13 @@ ANIMATE_MODELS = [
     "Wan-AI/Wan2.2-Animate-14B"
 ]
 
+ANISORA_MODELS = [
+    "AnisoraV3.2",
+    "AnisoraV3.1",
+]
+
 LTX_TWO_STAGE_MODEL = "Lightricks/LTX-2.3-I2AV-TwoStage"
+WAN_DEFAULT_CFG_SCALE = 5.0
 LTX_DEFAULT_FPS = 24
 LTX_DEFAULT_CFG_SCALE = 3.0
 LTX_DEFAULT_INFERENCE_STEPS = 30
@@ -83,6 +89,25 @@ def get_models_by_mode(mode: str) -> list[str]:
 
 def is_ltx_model(model_id: str | None) -> bool:
     return model_id == LTX_TWO_STAGE_MODEL
+
+
+def is_animate_model(model_id: str | None) -> bool:
+    return model_id in ANIMATE_MODELS
+
+
+def is_anisora_model(model_id: str | None) -> bool:
+    return model_id in ANISORA_MODELS
+
+
+def get_default_cfg_scale(model_id: str | None) -> float:
+    """返回不同模型更稳妥的 CFG 默认值。"""
+    if is_ltx_model(model_id):
+        return LTX_DEFAULT_CFG_SCALE
+    if is_anisora_model(model_id):
+        return 1.0
+    if is_animate_model(model_id):
+        return 1.0
+    return WAN_DEFAULT_CFG_SCALE
 
 
 def get_ltx_duration_label(num_frames) -> str:

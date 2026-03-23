@@ -14,7 +14,7 @@ from utils.model_config import (
     MEMORY_MODE_CHOICES, MEMORY_MODE_EXTREME, VACE_MODELS,
     ASPECT_RATIOS_14b, LTX_DEFAULT_CFG_SCALE, LTX_DEFAULT_FPS,
     LTX_DEFAULT_INFERENCE_STEPS, LTX_DURATION_FRAME_MAP, LTX_RESOLUTION_PRESETS,
-    get_models_by_mode, is_ltx_model
+    get_default_cfg_scale, get_models_by_mode, is_ltx_model
 )
 from utils.task_queue import enqueue_task, start_task_worker, stop_task_worker, kill_worker_subprocess
 
@@ -170,6 +170,15 @@ def configure_model_controls(model_id):
             gr.update(value=True, interactive=False, info="LTX 两阶段模型固定启用 Tiled VAE Decode"),
         )
 
+    cfg_scale = get_default_cfg_scale(model_id)
+    cfg_info = DEFAULT_CFG_INFO
+    if model_id in ANIMATE_MODELS:
+        cfg_info = "Animate 模型推荐 CFG Scale 为 1.0。"
+    elif model_id in ("AnisoraV3.2", "AnisoraV3.1"):
+        cfg_info = "AniSora 蒸馏模型推荐 CFG Scale 为 1.0。"
+    elif model_id in INP_MODELS or model_id in VACE_MODELS:
+        cfg_info = "Wan InP、I2V、VACE 模型通常使用 5.0 更稳定。"
+
     return (
         gr.update(visible=False),
         gr.update(value="6秒"),
@@ -179,7 +188,7 @@ def configure_model_controls(model_id):
         gr.update(value=720, minimum=256, maximum=1280, step=64, interactive=True, info=DEFAULT_HEIGHT_INFO),
         gr.update(value=81, minimum=16, maximum=256, step=1, interactive=True, info=DEFAULT_NUM_FRAMES_INFO),
         gr.update(value=8, minimum=1, maximum=100, step=1, interactive=True, info=DEFAULT_STEPS_INFO),
-        gr.update(value=1.0, minimum=1.0, maximum=20.0, step=0.5, interactive=True, info=DEFAULT_CFG_INFO),
+        gr.update(value=cfg_scale, minimum=1.0, maximum=20.0, step=0.5, interactive=True, info=cfg_info),
         gr.update(value=DEFAULT_ASPECT_RATIO, interactive=True, info=get_aspect_ratio_info(DEFAULT_ASPECT_RATIO)),
         gr.update(value=False, interactive=True, info=DEFAULT_TILED_INFO),
     )
@@ -566,11 +575,11 @@ def create_interface():
                         with gr.Row():
                             cfg_scale = gr.Slider(
                                 label="CFG Scale",
-                                value=1.0,
+                                value=get_default_cfg_scale(VACE_MODELS[0]),
                                 minimum=1.0,
                                 maximum=20.0,
                                 step=0.5,
-                                info="Classifier-Free Guidance 缩放因子，控制生成结果与提示词的匹配程度"
+                                info="Wan InP、I2V、VACE 模型通常使用 5.0 更稳定。"
                             )
                             sigma_shift = gr.Slider(
                                 label="Sigma Shift",
