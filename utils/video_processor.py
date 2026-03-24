@@ -3,7 +3,8 @@
 包含视频生成、pipeline初始化、模板视频预处理等核心逻辑
 """
 import os
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+os.environ.pop("PYTORCH_ALLOC_CONF", None)
 
 import random
 import torch

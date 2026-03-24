@@ -15,3 +15,4 @@ watchdog.log
 watchdog.sh
 .wanvace.pid
 .watchdog.lock
+.start_wanvace.sh

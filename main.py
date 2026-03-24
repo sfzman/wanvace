@@ -3,6 +3,18 @@ import sys
 import signal
 import atexit
 import threading
+
+
+def _sanitize_proxy_env():
+    """避免 httpx 因不支持裸 socks:// scheme 在导入 gradio 时直接报错。"""
+    for proxy_key in ("ALL_PROXY", "all_proxy"):
+        proxy_url = os.environ.get(proxy_key)
+        if proxy_url and proxy_url.lower().startswith("socks://"):
+            os.environ.pop(proxy_key, None)
+
+
+_sanitize_proxy_env()
+
 import gradio as gr
 
 from utils.video_utils import get_video_info

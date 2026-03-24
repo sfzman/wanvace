@@ -33,6 +33,7 @@ TASK_STATUS_DONE = "done"
 TASK_STATUS_FAILED = "failed"
 MAX_RETRIES = 2
 TASK_TIMEOUT = 600  # 10 分钟
+ANISORA_V32_MODEL = "AnisoraV3.2"
 
 _worker_thread = None
 _worker_stop_event = threading.Event()
@@ -53,7 +54,8 @@ def _worker_subprocess_fn(task_q, result_q):
     """在子进程中运行。循环接收任务、调用 process_video、回传结果。
     Pipeline 在子进程的全局变量中缓存，多次任务共享同一 pipeline。"""
     import queue as _queue_mod
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+    os.environ.pop("PYTORCH_ALLOC_CONF", None)
     while True:
         try:
             params = task_q.get(timeout=1.0)
@@ -95,6 +97,11 @@ def _worker_subprocess_fn(task_q, result_q):
         except Exception as e:
             import traceback
             result_q.put(("error", str(e), traceback.format_exc()))
+
+
+def _requires_isolated_worker(model_id):
+    """对已知存在跨任务状态污染的模型按 task 隔离子进程。"""
+    return model_id in {LTX_TWO_STAGE_MODEL, ANISORA_V32_MODEL}
 
 
 def _start_worker_subprocess():
@@ -243,13 +250,13 @@ def _task_worker_loop():
 
             params = task.get("params", {})
             model_id = params.get("model_id")
-            is_ltx_task = model_id == LTX_TWO_STAGE_MODEL
+            requires_isolated_worker = _requires_isolated_worker(model_id)
 
             # 确保子进程存活
             with _worker_proc_lock:
                 worker_proc = _worker_proc
-            if is_ltx_task and worker_proc is not None and worker_proc.is_alive():
-                # LTX 显存占用和碎片更敏感，按 task 隔离子进程以贴近 test.py 的单次执行行为。
+            if requires_isolated_worker and worker_proc is not None and worker_proc.is_alive():
+                # AniSora V3.2 / LTX 在长寿命 worker 中偶发状态污染；按 task 隔离更稳。
                 kill_worker_subprocess()
                 worker_proc = None
             if worker_proc is None or not worker_proc.is_alive():
@@ -336,14 +343,15 @@ def _task_worker_loop():
                         dest_task_dir = dest_dir / task_dir.name
                         shutil.move(str(task_dir), str(dest_task_dir))
                         moved_dir = str(dest_task_dir)
+                        task_file = dest_task_dir / task_file.name
                     print(f"[worker] 已剪切到输出目录: 视频={moved_video}, 任务目录={moved_dir}")
                 except Exception as move_e:
                     print(f"[worker] 剪切到输出目录失败: {move_e}")
             else:
                 print(f"[worker] 任务失败: {task_id}, 错误信息: {msg}")
 
-            if is_ltx_task:
-                # 无论成功失败都销毁 LTX 子进程，避免下一个任务复用碎片化 CUDA context。
+            if requires_isolated_worker:
+                # 无论成功失败都销毁隔离型任务子进程，避免下一个任务复用污染状态。
                 kill_worker_subprocess()
 
             task["result"] = {
