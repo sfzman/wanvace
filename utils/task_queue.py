@@ -26,7 +26,7 @@ TASK_STATUS_RUNNING = "running"
 TASK_STATUS_DONE = "done"
 TASK_STATUS_FAILED = "failed"
 MAX_RETRIES = 2
-TASK_TIMEOUT = 600  # 10 分钟
+TASK_TIMEOUT = 1200  # 20 分钟
 
 _worker_thread = None
 _worker_stop_event = threading.Event()
