@@ -20,10 +20,12 @@ from datetime import datetime
 from utils.model_config import (
     DEFAULT_MEMORY_MODE,
     LTX_TWO_STAGE_MODEL,
+    MEMORY_MODE_EXTREME,
     VACE_MODELS,
     get_default_cfg_scale,
     normalize_ltx_generation_params,
 )
+from utils.torch_env import configure_torch_cuda_allocator_env
 
 # 任务队列配置
 TASK_QUEUE_DIR = Path("./task_queue").resolve()
@@ -54,8 +56,7 @@ def _worker_subprocess_fn(task_q, result_q):
     """在子进程中运行。循环接收任务、调用 process_video、回传结果。
     Pipeline 在子进程的全局变量中缓存，多次任务共享同一 pipeline。"""
     import queue as _queue_mod
-    os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
-    os.environ.pop("PYTORCH_ALLOC_CONF", None)
+    configure_torch_cuda_allocator_env()
     while True:
         try:
             params = task_q.get(timeout=1.0)
@@ -70,7 +71,7 @@ def _worker_subprocess_fn(task_q, result_q):
         try:
             from utils.video_processor import process_video
             from utils.model_config import VACE_MODELS as _vm
-            out_path, msg = process_video(
+            result = process_video(
                 params.get("depth_video"),
                 params.get("reference_image"),
                 params.get("prompt"),
@@ -93,15 +94,46 @@ def _worker_subprocess_fn(task_q, result_q):
                 params.get("cfg_scale", get_default_cfg_scale(params.get("model_id", _vm[0]))),
                 params.get("sigma_shift", 5.0),
             )
-            result_q.put(("ok", out_path, msg))
+            if isinstance(result, tuple) and len(result) == 3:
+                out_path, msg, diagnostics = result
+            else:
+                out_path, msg = result
+                diagnostics = None
+            result_q.put(("ok", out_path, msg, diagnostics))
         except Exception as e:
             import traceback
             result_q.put(("error", str(e), traceback.format_exc()))
 
 
-def _requires_isolated_worker(model_id):
+def _requires_isolated_worker(model_id, keep_worker_alive=False):
     """对已知存在跨任务状态污染的模型按 task 隔离子进程。"""
-    return model_id in {LTX_TWO_STAGE_MODEL, ANISORA_V32_MODEL}
+    if model_id == LTX_TWO_STAGE_MODEL:
+        return True
+    if model_id == ANISORA_V32_MODEL:
+        return not keep_worker_alive
+    return False
+
+
+def _is_cuda_oom_error(*parts):
+    error_text = " ".join(str(part) for part in parts if part).lower()
+    return (
+        "cuda out of memory" in error_text
+        or "torch.outofmemoryerror" in error_text
+        or "cudaoutofmemoryerror" in error_text
+    )
+
+
+def _prepare_oom_retry(task):
+    params = task.setdefault("params", {})
+    current_mode = params.get("memory_mode", DEFAULT_MEMORY_MODE)
+    switched_to_extreme = current_mode != MEMORY_MODE_EXTREME
+    if switched_to_extreme:
+        params["memory_mode"] = MEMORY_MODE_EXTREME
+
+    retry_note = "检测到 CUDA OOM，已重启 worker 并清理 CUDA 上下文。"
+    if switched_to_extreme:
+        retry_note += " 下次重试将自动切换到“极限省显存”模式。"
+    return retry_note
 
 
 def _start_worker_subprocess():
@@ -250,7 +282,8 @@ def _task_worker_loop():
 
             params = task.get("params", {})
             model_id = params.get("model_id")
-            requires_isolated_worker = _requires_isolated_worker(model_id)
+            keep_worker_alive = bool(params.get("anisora_keep_worker_alive", False))
+            requires_isolated_worker = _requires_isolated_worker(model_id, keep_worker_alive=keep_worker_alive)
 
             # 确保子进程存活
             with _worker_proc_lock:
@@ -276,6 +309,7 @@ def _task_worker_loop():
             out_path = None
             msg = ""
             result = None
+            diagnostics = None
             elapsed = 0.0
 
             while elapsed < TASK_TIMEOUT and not _worker_stop_event.is_set():
@@ -310,6 +344,7 @@ def _task_worker_loop():
                 msg = f"任务超时（超过 {TASK_TIMEOUT // 60} 分钟），已强制终止子进程"
             elif result[0] == "ok":
                 out_path, msg = result[1], result[2]
+                diagnostics = result[3] if len(result) > 3 else None
             else:
                 out_path = None
                 msg = f"执行异常：{result[1]}\n\n详细错误信息：\n{result[2]}"
@@ -319,6 +354,16 @@ def _task_worker_loop():
 
             task["status"] = TASK_STATUS_DONE if out_path else TASK_STATUS_FAILED
             task["finished_at"] = datetime.now().isoformat()
+            is_cuda_oom = not out_path and _is_cuda_oom_error(msg, result[1] if result else None, result[2] if result and len(result) > 2 else None)
+            retry_count = int(task.get("retries", 0)) + (0 if task["status"] == TASK_STATUS_DONE else 1)
+
+            if is_cuda_oom:
+                print(f"[worker] 检测到 CUDA OOM，重启工作子进程: {task_id}")
+                kill_worker_subprocess()
+                retry_note = _prepare_oom_retry(task)
+                msg = f"{msg}\n\n[自动恢复] {retry_note}"
+                if retry_count <= MAX_RETRIES:
+                    task["status"] = TASK_STATUS_PENDING
 
             # 若成功则将视频与任务目录剪切到输出目录
             moved_dir = None
@@ -359,6 +404,7 @@ def _task_worker_loop():
                 "message": msg,
                 "moved_video": moved_video,
                 "moved_task_dir": moved_dir,
+                "diagnostics": diagnostics,
             }
 
             end_time = datetime.now()
@@ -366,7 +412,7 @@ def _task_worker_loop():
             task["duration_seconds"] = round(duration_seconds, 2)
             print(f"[worker] 任务完成: {task_id}, 状态: {task['status']}, 耗时: {task['duration_seconds']}s")
 
-            task["retries"] = int(task.get("retries", 0)) + (0 if task["status"] == TASK_STATUS_DONE else 1)
+            task["retries"] = retry_count
             _atomic_write_json(task_file, task)
 
         except Exception:
@@ -416,6 +462,7 @@ def enqueue_task(
     first_frame,
     last_frame,
     tiled,
+    anisora_keep_worker_alive,
     animate_reference_image,
     template_video,
     save_folder_path,
@@ -466,6 +513,7 @@ def enqueue_task(
             "first_frame": first_frame_path,
             "last_frame": last_frame_path,
             "tiled": normalized_generation["tiled"],
+            "anisora_keep_worker_alive": bool(anisora_keep_worker_alive),
             "animate_reference_image": animate_reference_image_path,
             "template_video": template_video_path,
             "save_folder_path": save_folder_path or "./outputs",

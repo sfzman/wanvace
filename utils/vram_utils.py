@@ -1,5 +1,33 @@
+from utils.torch_env import configure_torch_cuda_allocator_env
+
+configure_torch_cuda_allocator_env()
+
 import torch
 import gc
+
+def release_cuda_memory(synchronize=False):
+    """回收未被引用的 CUDA 缓存，尽量降低后续任务的碎片化风险。"""
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+
+    if synchronize:
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+    if hasattr(torch.cuda, "ipc_collect"):
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
 
 def clear_vram():
     """释放显存 — 清理 video_processor 中的全局 pipeline 并释放 CUDA 缓存"""
@@ -12,11 +40,7 @@ def clear_vram():
             vp.selected_model = None
             vp.last_used_model = None
 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-
-        gc.collect()
+        release_cuda_memory(synchronize=True)
 
         return "显存释放完成！"
     except Exception as e:

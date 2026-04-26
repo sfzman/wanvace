@@ -4,6 +4,8 @@ import signal
 import atexit
 import threading
 
+from utils.torch_env import configure_torch_cuda_allocator_env
+
 
 def _sanitize_proxy_env():
     """避免 httpx 因不支持裸 socks:// scheme 在导入 gradio 时直接报错。"""
@@ -14,6 +16,7 @@ def _sanitize_proxy_env():
 
 
 _sanitize_proxy_env()
+configure_torch_cuda_allocator_env()
 
 import gradio as gr
 
@@ -32,7 +35,9 @@ from utils.task_queue import enqueue_task, start_task_worker, stop_task_worker, 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-DEFAULT_ASPECT_RATIO = "16:9"
+DEFAULT_INP_MODEL = "AnisoraV3.2"
+DEFAULT_ASPECT_RATIO = "16:9_low"
+DEFAULT_WIDTH, DEFAULT_HEIGHT = ASPECT_RATIOS_14b[DEFAULT_ASPECT_RATIO]
 DEFAULT_FPS_INFO = ""
 DEFAULT_WIDTH_INFO = "视频宽度（像素）"
 DEFAULT_HEIGHT_INFO = "视频高度（像素）"
@@ -40,6 +45,38 @@ DEFAULT_NUM_FRAMES_INFO = "视频总帧数，建议时长（秒）*FPS+1"
 DEFAULT_STEPS_INFO = "推理步数，步数越多质量越高但速度越慢"
 DEFAULT_CFG_INFO = "Classifier-Free Guidance 缩放因子，控制生成结果与提示词的匹配程度"
 DEFAULT_TILED_INFO = "是否启用 VAE 分块推理。设置为 `True` 时可显著减少 VAE 编解码阶段的显存占用，会产生少许误差，以及少量推理时间延长。"
+GENERATE_SHORTCUT_HEAD = """
+<script>
+(() => {
+    if (window.__wanvaceGenerateShortcutBound) {
+        return;
+    }
+    window.__wanvaceGenerateShortcutBound = true;
+
+    function getGenerateButton() {
+        const container = document.getElementById("generate_video_btn");
+        if (!container) {
+            return null;
+        }
+        return container.matches("button") ? container : container.querySelector("button");
+    }
+
+    document.addEventListener("keydown", (event) => {
+        if (event.isComposing || event.repeat || !event.ctrlKey || event.key !== "Enter") {
+            return;
+        }
+
+        const generateButton = getGenerateButton();
+        if (!generateButton || generateButton.disabled || generateButton.offsetParent === null) {
+            return;
+        }
+
+        event.preventDefault();
+        generateButton.click();
+    });
+})();
+</script>
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +147,7 @@ def handle_tab_change(evt: gr.SelectData):
         default_model = VACE_MODELS[0]
     elif evt.index == 1:  # 首尾帧模式
         models = INP_MODELS
-        default_model = INP_MODELS[0]
+        default_model = DEFAULT_INP_MODEL
     else:  # Animate模式
         models = ANIMATE_MODELS
         default_model = ANIMATE_MODELS[0]
@@ -124,7 +161,7 @@ def update_dimensions(aspect_ratio):
     if aspect_ratio in ASPECT_RATIOS_14b:
         width, height = ASPECT_RATIOS_14b[aspect_ratio]
         return height, width
-    return 480, 832  # 默认值
+    return DEFAULT_HEIGHT, DEFAULT_WIDTH  # 默认值
 
 
 def update_size_display(aspect_ratio):
@@ -133,7 +170,7 @@ def update_size_display(aspect_ratio):
         width, height = ASPECT_RATIOS_14b[aspect_ratio]
         size_text = f"{width} × {height}"
     else:
-        size_text = "832 × 480"  # 默认值
+        size_text = f"{DEFAULT_WIDTH} × {DEFAULT_HEIGHT}"  # 默认值
     
     info_text = f"选择预设的宽高比，系统会自动计算对应的尺寸\n当前尺寸: {size_text}"
     return gr.Dropdown(info=info_text)
@@ -144,7 +181,7 @@ def get_aspect_ratio_info(aspect_ratio):
         width, height = ASPECT_RATIOS_14b[aspect_ratio]
         size_text = f"{width} × {height}"
     else:
-        size_text = "832 × 480"
+        size_text = f"{DEFAULT_WIDTH} × {DEFAULT_HEIGHT}"
     return f"选择预设的宽高比，系统会自动计算对应的尺寸\n当前尺寸: {size_text}"
 
 
@@ -180,6 +217,7 @@ def configure_model_controls(model_id):
             gr.update(value=LTX_DEFAULT_CFG_SCALE, minimum=1.0, maximum=20.0, step=0.5, interactive=True, info="LTX pipeline 默认 CFG Scale 为 3.0"),
             gr.update(value=DEFAULT_ASPECT_RATIO, interactive=False, info="LTX 分辨率由下方“LTX 官方参数”控制"),
             gr.update(value=True, interactive=False, info="LTX 两阶段模型固定启用 Tiled VAE Decode"),
+            gr.update(visible=False, value=False),
         )
 
     cfg_scale = get_default_cfg_scale(model_id)
@@ -196,13 +234,18 @@ def configure_model_controls(model_id):
         gr.update(value="6秒"),
         gr.update(value="横屏 1920×1080"),
         gr.update(value=16, minimum=1, maximum=60, step=1, interactive=True, info=DEFAULT_FPS_INFO),
-        gr.update(value=1280, minimum=256, maximum=1280, step=64, interactive=True, info=DEFAULT_WIDTH_INFO),
-        gr.update(value=720, minimum=256, maximum=1280, step=64, interactive=True, info=DEFAULT_HEIGHT_INFO),
+        gr.update(value=DEFAULT_WIDTH, minimum=256, maximum=1280, step=64, interactive=True, info=DEFAULT_WIDTH_INFO),
+        gr.update(value=DEFAULT_HEIGHT, minimum=256, maximum=1280, step=64, interactive=True, info=DEFAULT_HEIGHT_INFO),
         gr.update(value=81, minimum=16, maximum=256, step=1, interactive=True, info=DEFAULT_NUM_FRAMES_INFO),
         gr.update(value=8, minimum=1, maximum=100, step=1, interactive=True, info=DEFAULT_STEPS_INFO),
         gr.update(value=cfg_scale, minimum=1.0, maximum=20.0, step=0.5, interactive=True, info=cfg_info),
         gr.update(value=DEFAULT_ASPECT_RATIO, interactive=True, info=get_aspect_ratio_info(DEFAULT_ASPECT_RATIO)),
         gr.update(value=False, interactive=True, info=DEFAULT_TILED_INFO),
+        gr.update(
+            visible=(model_id == "AnisoraV3.2"),
+            value=True,
+            info="实验开关。关闭时每个任务都会重启 AniSora worker，黑屏更少但加载更频繁；开启后连续任务复用同一个 worker，便于排查是否由反复加载触发 OOM。"
+        ),
     )
 
 
@@ -368,7 +411,11 @@ def create_preview_tab():
 
 def create_interface():
     """创建Gradio界面"""
-    with gr.Blocks(title="WanVACE 视频生成器", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(
+        title="WanVACE 视频生成器",
+        theme=gr.themes.Soft(),
+        head=GENERATE_SHORTCUT_HEAD,
+    ) as demo:
         gr.Markdown("# 🎬 WanVACE 视频生成器")
         gr.Markdown("使用 Wan / LTX 模型生成高质量视频")
         
@@ -379,7 +426,7 @@ def create_interface():
                     with gr.Column(scale=1):
                         gr.Markdown("## 📤 输入设置")
                         
-                        with gr.Tabs() as input_tabs:
+                        with gr.Tabs(selected="inp_tab") as input_tabs:
                             with gr.TabItem("🎬 VACE模式 (深度视频+参考图片)", id="vace_tab"):
                                 depth_video = gr.Video(
                                     label="深度视频 (Depth Video)",
@@ -465,8 +512,8 @@ def create_interface():
                         # 模型选择
                         model_id = gr.Dropdown(
                             label="选择模型",
-                            choices=VACE_MODELS,
-                            value="PAI/Wan2.2-VACE-Fun-A14B",
+                            choices=INP_MODELS,
+                            value=DEFAULT_INP_MODEL,
                             info="模型会根据选择的输入模式自动更新"
                         )
                         
@@ -519,15 +566,15 @@ def create_interface():
                                 aspect_ratio = gr.Dropdown(
                                     label="选择宽高比",
                                     choices=list(ASPECT_RATIOS_14b.keys()),
-                                    value="16:9",
-                                    info="选择预设的宽高比，系统会自动计算对应的尺寸\n当前尺寸: 1280 × 720"
+                                    value=DEFAULT_ASPECT_RATIO,
+                                    info=get_aspect_ratio_info(DEFAULT_ASPECT_RATIO)
                                 )
                             
                             with gr.TabItem("🔧 手动设置", id="manual_size_tab"):
                                 with gr.Row():
                                     width = gr.Number(
                                         label="视频宽度",
-                                        value=1280,
+                                        value=DEFAULT_WIDTH,
                                         minimum=256,
                                         maximum=1280,
                                         step=64,
@@ -535,7 +582,7 @@ def create_interface():
                                     )
                                     height = gr.Number(
                                         label="视频高度",
-                                        value=720,
+                                        value=DEFAULT_HEIGHT,
                                         minimum=256,
                                         maximum=1280,
                                         step=64,
@@ -587,7 +634,7 @@ def create_interface():
                         with gr.Row():
                             cfg_scale = gr.Slider(
                                 label="CFG Scale",
-                                value=get_default_cfg_scale(VACE_MODELS[0]),
+                                value=get_default_cfg_scale(DEFAULT_INP_MODEL),
                                 minimum=1.0,
                                 maximum=20.0,
                                 step=0.5,
@@ -618,6 +665,13 @@ def create_interface():
                                 info="是否启用 VAE 分块推理。设置为 `True` 时可显著减少 VAE 编解码阶段的显存占用，会产生少许误差，以及少量推理时间延长。"
                             )
                         
+                        anisora_keep_worker = gr.Checkbox(
+                            label="AniSora 连续任务保活 Worker（实验）",
+                            value=True,
+                            visible=False,
+                            info="关闭时每个 AniSora V3.2 任务都会重启 worker；开启后连续任务会复用同一个 worker，用于排查是否反复加载触发 OOM。"
+                        )
+                        
                         # 视频保存设置
                         gr.Markdown("### 💾 视频保存设置")
                         save_folder_path = gr.Textbox(
@@ -627,7 +681,12 @@ def create_interface():
                             info="支持相对路径和绝对路径，每次生成会创建时间戳子文件夹"
                         )
                         
-                        generate_btn = gr.Button("🎬 生成视频", variant="primary", size="lg")
+                        generate_btn = gr.Button(
+                            "🎬 生成视频",
+                            variant="primary",
+                            size="lg",
+                            elem_id="generate_video_btn",
+                        )
                         
                         output_status = gr.Textbox(
                             label="任务状态",
@@ -658,6 +717,7 @@ def create_interface():
                         cfg_scale,
                         aspect_ratio,
                         tiled_checkbox,
+                        anisora_keep_worker,
                     ]
                 )
 
@@ -676,6 +736,26 @@ def create_interface():
                         cfg_scale,
                         aspect_ratio,
                         tiled_checkbox,
+                        anisora_keep_worker,
+                    ]
+                )
+
+                demo.load(
+                    fn=configure_model_controls,
+                    inputs=[model_id],
+                    outputs=[
+                        ltx_controls,
+                        ltx_duration,
+                        ltx_resolution,
+                        fps,
+                        width,
+                        height,
+                        num_frames,
+                        num_inference_steps,
+                        cfg_scale,
+                        aspect_ratio,
+                        tiled_checkbox,
+                        anisora_keep_worker,
                     ]
                 )
                 
@@ -774,6 +854,7 @@ def create_interface():
                         first_frame,
                         last_frame,
                         tiled_checkbox,
+                        anisora_keep_worker,
                         animate_reference_image,
                         template_video,
                         save_folder_path,
@@ -858,7 +939,7 @@ def create_interface():
         - **推理步数**：控制生成质量，步数越多质量越高但速度越慢
           - LTX 默认会切换到 pipeline 推荐值：30 步
         - **显存模式**：
-          - **均衡模式（推荐）**：自动预留约 2GB 缓冲，兼顾速度和显存占用
+          - **均衡模式（推荐）**：默认使用约 92% 的总显存预算，兼顾速度和显存占用
           - **极限省显存**：使用更激进的 offload，显存更省，但速度更慢
         - **Tiled VAE Decode**：启用分块VAE解码，可提高性能但可能导致VAE错误
         

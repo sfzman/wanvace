@@ -3,8 +3,10 @@
 包含视频生成、pipeline初始化、模板视频预处理等核心逻辑
 """
 import os
-os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
-os.environ.pop("PYTORCH_ALLOC_CONF", None)
+
+from utils.torch_env import configure_torch_cuda_allocator_env
+
+configure_torch_cuda_allocator_env()
 
 import random
 import torch
@@ -14,6 +16,7 @@ import tempfile
 import time
 import numpy as np
 from PIL import Image
+from pathlib import Path
 
 try:
     from diffsynth.utils.data import save_video, VideoData
@@ -35,7 +38,7 @@ except ImportError:
     write_video_audio_ltx2 = None
 
 from utils.video_utils import clean_temp_videos, reencode_video_to_16fps
-from utils.vram_utils import clear_vram
+from utils.vram_utils import clear_vram, release_cuda_memory
 from utils.model_config import (
     ANIMATE_MODELS, DEFAULT_MEMORY_MODE, INP_MODELS, MEMORY_MODE_BALANCED,
     MEMORY_MODE_EXTREME, VACE_MODELS, LTX_TWO_STAGE_MODEL, get_default_cfg_scale,
@@ -80,9 +83,9 @@ def set_wan_ditblock_vram_wrapper(use_safe_wrapper=False):
 
 
 def get_auto_vram_limit():
-    """自动计算显存管理阈值：总显存减去约 2GB 缓冲。"""
+    """自动计算显存管理阈值：默认使用总显存的 92%。"""
     total_vram_gb = torch.cuda.mem_get_info("cuda")[1] / (1024 ** 3)
-    return max(total_vram_gb - 2.0, 0.0)
+    return max(total_vram_gb * 0.92, 0.0)
 
 
 def get_ltx_vram_limit():
@@ -297,6 +300,38 @@ def analyze_video_frames(video):
     }
 
 
+def summarize_input_asset(asset):
+    """为任务结果生成轻量输入摘要，便于复盘黑屏条件。"""
+    if asset is None or asset == "":
+        return None
+
+    summary = {"python_type": type(asset).__name__}
+    if isinstance(asset, str):
+        asset_path = Path(asset)
+        summary["path"] = str(asset_path.resolve())
+        summary["name"] = asset_path.name
+        summary["exists"] = asset_path.exists()
+        if asset_path.exists():
+            try:
+                summary["size_bytes"] = asset_path.stat().st_size
+            except OSError:
+                pass
+            try:
+                with Image.open(asset_path) as img:
+                    summary["image_size"] = [img.width, img.height]
+                    summary["image_mode"] = img.mode
+            except Exception:
+                pass
+        return summary
+
+    if isinstance(asset, Image.Image):
+        summary["image_size"] = [asset.width, asset.height]
+        summary["image_mode"] = asset.mode
+        return summary
+
+    return summary
+
+
 def preprocess_template_video(template_video_path, reference_image_path, width, height, num_frames):
     """预处理模板视频，生成pose和face视频"""
     try:
@@ -410,8 +445,7 @@ def initialize_pipeline(model_id="PAI/Wan2.2-VACE-Fun-A14B", memory_mode=DEFAULT
         )
         del pipe
         pipe = None
-        torch.cuda.empty_cache()
-        gc.collect()
+        release_cuda_memory()
     
     if should_reinitialize:
         print(f"正在初始化模型: {model_id}")
@@ -575,6 +609,44 @@ def process_video(
 ):
     """处理视频生成"""
     global pipe, last_used_model
+    diagnostics = {
+        "model_id": model_id,
+        "requested_seed": seed,
+        "effective_seed": None,
+        "input_mode": None,
+        "generation_params": {},
+        "input_summary": {
+            "depth_video": summarize_input_asset(depth_video),
+            "reference_image": summarize_input_asset(reference_image),
+            "first_frame": summarize_input_asset(first_frame),
+            "last_frame": summarize_input_asset(last_frame),
+            "animate_reference_image": summarize_input_asset(animate_reference_image),
+            "template_video": summarize_input_asset(template_video),
+        },
+        "prompt_summary": {
+            "prompt_length": len(prompt or ""),
+            "negative_prompt_length": len(negative_prompt or ""),
+        },
+        "video_stats": None,
+    }
+
+    def build_response(output_path, message, error_trace=None):
+        if error_trace:
+            diagnostics["error_trace"] = error_trace
+        return output_path, message, diagnostics
+
+    vace_video = None
+    vace_reference_image = None
+    animate_reference_img = None
+    pose_video_data = None
+    face_video_data = None
+    video = None
+    audio = None
+    first_frame_img = None
+    last_frame_img = None
+    input_images = None
+    temp_dir = None
+
     try:
         normalized_generation = normalize_ltx_generation_params(
             model_id=model_id,
@@ -589,53 +661,66 @@ def process_video(
         height = normalized_generation["height"]
         num_frames = normalized_generation["num_frames"]
         tiled = normalized_generation["tiled"]
+        diagnostics["generation_params"].update({
+            "fps": fps,
+            "width": width,
+            "height": height,
+            "num_frames": num_frames,
+            "num_inference_steps": num_inference_steps,
+            "quality": quality,
+            "tiled": tiled,
+            "sigma_shift": sigma_shift,
+            "memory_mode": memory_mode,
+        })
 
         # 根据模型类型判断输入模式
         is_inp_mode = model_id in INP_MODELS
         is_animate_mode = is_animate_model(model_id)
         is_ltx_inp_mode = is_ltx_model(model_id)
+        diagnostics["input_mode"] = "inp" if is_inp_mode else "animate" if is_animate_mode else "vace"
         
         if is_inp_mode:
             # InP模式：需要首帧，尾帧可选
             has_first_frame = first_frame is not None
             if not has_first_frame:
-                return None, "错误：首尾帧模式需要上传首帧图片"
+                return build_response(None, "错误：首尾帧模式需要上传首帧图片")
         elif is_animate_mode:
             # Animate模式：需要参考图片和模板视频
             has_reference_image = animate_reference_image is not None
             has_template_video = template_video is not None and template_video != ""
             if not has_reference_image:
-                return None, "错误：Animate模式需要上传参考图片"
+                return build_response(None, "错误：Animate模式需要上传参考图片")
             if not has_template_video:
-                return None, "错误：Animate模式需要上传模板视频"
+                return build_response(None, "错误：Animate模式需要上传模板视频")
         else:
             # VACE模式：需要深度视频或参考图片
             has_depth_video = depth_video is not None and depth_video != ""
             has_reference_image = reference_image is not None
             if not has_depth_video and not has_reference_image:
-                return None, "错误：请至少上传深度视频或参考图片中的一种"
+                return build_response(None, "错误：请至少上传深度视频或参考图片中的一种")
         
         if seed < 0:
             seed = random.randint(1, 2**32 - 1)
+        diagnostics["effective_seed"] = seed
 
         if cfg_scale is None:
             cfg_scale = get_default_cfg_scale(model_id)
+        diagnostics["generation_params"]["cfg_scale"] = cfg_scale
         
         # 自动初始化pipeline；模型或显存限制变化时会重新初始化
         status = initialize_pipeline(model_id, memory_mode)
         if "完成" not in status:
-            return None, f"model_id初始化失败：{status}"
+            return build_response(None, f"model_id初始化失败：{status}")
         
-        vace_video = None
-        vace_reference_image = None
-        animate_reference_img = None
-        template_video_data = None
-
         if not prompt:
             prompt = "两只可爱的橘猫戴上拳击手套，站在一个拳击台上搏斗。"
         
         if not negative_prompt:
             negative_prompt = "过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+        diagnostics["prompt_summary"] = {
+            "prompt_length": len(prompt),
+            "negative_prompt_length": len(negative_prompt),
+        }
 
         if is_inp_mode:
             # InP模式：处理首尾帧
@@ -696,7 +781,7 @@ def process_video(
                         sigma_shift=sigma_shift,
                     )
             else:
-                return None, "首尾帧模式需要上传首帧图片"
+                return build_response(None, "首尾帧模式需要上传首帧图片")
         elif is_animate_mode:
             # Animate模式：处理参考图片和模板视频
             if has_reference_image:
@@ -727,7 +812,7 @@ def process_video(
                 animate_reference_img = Image.open(reference_image_path).resize((width, height)).convert("RGB")
                 
                 if pose_video_path is None:
-                    return None, f"模板视频预处理失败：{face_video_path}"  # face_video_path此时包含错误信息
+                    return build_response(None, f"模板视频预处理失败：{face_video_path}")  # face_video_path此时包含错误信息
                 
                 try:
                     # 加载预处理后的pose视频
@@ -743,7 +828,7 @@ def process_video(
                 except Exception as e:
                     print(f"预处理视频加载失败: {e}")
                     shutil.rmtree(temp_dir, ignore_errors=True)
-                    return None, f"预处理视频加载失败：{str(e)}"
+                    return build_response(None, f"预处理视频加载失败：{str(e)}")
             
             # 调用Animate模型的pipeline（与test.py保持一致）
             video = pipe(
@@ -762,9 +847,6 @@ def process_video(
                 sigma_shift=sigma_shift,
             )
             
-            # 清理临时文件
-            if 'temp_dir' in locals():
-                shutil.rmtree(temp_dir, ignore_errors=True)
         else:
             # VACE模式：处理深度视频和参考图片
             if has_depth_video:
@@ -781,7 +863,7 @@ def process_video(
                     print(f"成功创建VideoData，尺寸: {width}x{height}")
                 except Exception as e:
                     print(f"VideoData创建失败: {e}")
-                    return None, f"深度视频处理失败：{str(e)}\n请确保视频尺寸与目标尺寸兼容"
+                    return build_response(None, f"深度视频处理失败：{str(e)}\n请确保视频尺寸与目标尺寸兼容")
             
             if has_reference_image:
                 print(f"调试信息：参考图片 = {reference_image}, 类型 = {type(reference_image)}")
@@ -809,6 +891,7 @@ def process_video(
         timestamp = int(time.time())
         output_path = f"output_video_{seed}_{timestamp}.mp4"
         video_stats = analyze_video_frames(video)
+        diagnostics["video_stats"] = video_stats
         print(
             "生成结果统计: "
             f"frames={video_stats['frame_count']}, "
@@ -833,9 +916,6 @@ def process_video(
         else:
             save_video(video, output_path, fps=fps, quality=quality)
 
-        print("cleaning temp videos...")
-        clean_temp_videos()
-        
         # 只有当模型切换时才清理显存
         if last_used_model is not None and last_used_model != model_id:
             print(f"检测到模型切换（{last_used_model} -> {model_id}），清理显存...")
@@ -848,10 +928,38 @@ def process_video(
         
         # 不再在此处保存/复制；统一由后台线程在任务成功后剪切
         if video_stats["all_black"]:
-            return output_path, f"视频生成完成，但输出帧全黑，已保存为 {output_path}。这通常说明推理阶段异常，不是保存阶段异常。"
-        return output_path, f"视频生成成功！已保存为 {output_path}"
+            return build_response(
+                output_path,
+                f"视频生成完成，但输出帧全黑，已保存为 {output_path}。这通常说明推理阶段异常，不是保存阶段异常。"
+            )
+        return build_response(output_path, f"视频生成成功！已保存为 {output_path}")
         
     except Exception as e:
         import traceback
         error_trace = traceback.format_exc()
-        return None, f"生成过程中出现错误：{str(e)}\n\n详细错误信息：\n{error_trace}"
+        return build_response(None, f"生成过程中出现错误：{str(e)}\n\n详细错误信息：\n{error_trace}", error_trace=error_trace)
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        for image_obj in (first_frame_img, last_frame_img, vace_reference_image, animate_reference_img):
+            if isinstance(image_obj, Image.Image):
+                try:
+                    image_obj.close()
+                except Exception:
+                    pass
+
+        vace_video = None
+        pose_video_data = None
+        face_video_data = None
+        video = None
+        audio = None
+        input_images = None
+        first_frame_img = None
+        last_frame_img = None
+        vace_reference_image = None
+        animate_reference_img = None
+
+        print("cleaning temp videos...")
+        clean_temp_videos()
+        release_cuda_memory()

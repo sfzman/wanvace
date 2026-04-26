@@ -53,7 +53,7 @@ MEMORY_MODE_CHOICES = [
     MEMORY_MODE_EXTREME,
 ]
 MEMORY_MODE_INFO = {
-    MEMORY_MODE_BALANCED: "速度和显存更均衡，自动预留约 2GB 缓冲。",
+    MEMORY_MODE_BALANCED: "速度和显存更均衡，默认使用约 92% 的总显存预算。",
     MEMORY_MODE_EXTREME: "使用更激进的 offload，显存更省，但明显更慢。",
 }
 DEFAULT_MEMORY_MODE = MEMORY_MODE_BALANCED
