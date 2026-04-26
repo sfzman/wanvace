@@ -3,26 +3,9 @@
 包含模型列表、宽高比配置等
 """
 
-# 定义不同模式对应的模型列表
-VACE_MODELS = [
-    "PAI/Wan2.2-VACE-Fun-A14B",
-    "Wan-AI/Wan2.1-VACE-14B",
-    "Wan-AI/Wan2.1-VACE-1.3B"
-]
-
+# 首尾帧模式只保留当前可用模型
 INP_MODELS = [
-    "PAI/Wan2.2-Fun-A14B-InP",
-    "PAI/Wan2.1-Fun-14B-InP",
-    "PAI/Wan2.1-Fun-V1.1-1.3B-InP",
-    # 以下仅仅支持首帧图片，不支持尾帧图片
-    "Wan-AI/Wan2.1-I2V-14B-480P",
-    "Wan-AI/Wan2.2-I2V-A14B",
     "AnisoraV3.2",
-    "AnisoraV3.1",
-]
-
-ANIMATE_MODELS = [
-    "Wan-AI/Wan2.2-Animate-14B"
 ]
 
 ASPECT_RATIOS_14b = {
@@ -44,12 +27,7 @@ ASPECT_RATIOS_14b = {
 
 def get_models_by_mode(mode: str) -> list[str]:
     """根据输入模式返回对应的模型列表"""
-    if mode == "vace":
-        return VACE_MODELS
-    elif mode == "inp":
+    if mode == "inp":
         return INP_MODELS
-    elif mode == "animate":
-        return ANIMATE_MODELS
     else:
-        return VACE_MODELS  # 默认返回VACE模型
-
+        return INP_MODELS

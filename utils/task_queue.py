@@ -14,10 +14,9 @@ import threading
 import multiprocessing as mp
 import uuid
 import shutil
-import time
 from pathlib import Path
 from datetime import datetime
-from utils.model_config import VACE_MODELS
+from utils.model_config import INP_MODELS
 
 # 任务队列配置
 TASK_QUEUE_DIR = Path("./task_queue").resolve()
@@ -59,10 +58,7 @@ def _worker_subprocess_fn(task_q, result_q):
 
         try:
             from utils.video_processor import process_video
-            from utils.model_config import VACE_MODELS as _vm
             out_path, msg = process_video(
-                params.get("depth_video"),
-                params.get("reference_image"),
                 params.get("prompt"),
                 params.get("negative_prompt"),
                 params.get("seed", -1),
@@ -73,12 +69,10 @@ def _worker_subprocess_fn(task_q, result_q):
                 params.get("num_frames", 81),
                 params.get("num_inference_steps", 30),
                 params.get("vram_limit", 6.0),
-                params.get("model_id", _vm[0]),
+                params.get("model_id", INP_MODELS[0]),
                 params.get("first_frame"),
                 params.get("last_frame"),
                 params.get("tiled", False),
-                params.get("animate_reference_image"),
-                params.get("template_video"),
                 "",  # 传空以跳过 process_video 中的复制保存
                 params.get("cfg_scale", 1.0),
                 params.get("sigma_shift", 5.0),
@@ -336,7 +330,7 @@ def start_task_worker():
         return "任务工作线程已在运行"
     _ensure_task_dirs()
     _worker_stop_event.clear()
-    _worker_thread = threading.Thread(target=_task_worker_loop, name="wanvace-task-worker", daemon=True)
+    _worker_thread = threading.Thread(target=_task_worker_loop, name="inp-task-worker", daemon=True)
     _worker_thread.start()
     return "任务工作线程已启动"
 
@@ -348,8 +342,6 @@ def stop_task_worker():
 
 
 def enqueue_task(
-    depth_video,
-    reference_image,
     prompt,
     negative_prompt,
     seed,
@@ -364,14 +356,14 @@ def enqueue_task(
     first_frame,
     last_frame,
     tiled,
-    animate_reference_image,
-    template_video,
     save_folder_path,
     cfg_scale=1.0,
     sigma_shift=5.0
 ):
-    """将当前生成请求持久化为任务文件并入队（立即返回）。"""
+    """将当前首尾帧生成请求持久化为任务文件并入队（立即返回）。"""
 
+    if first_frame is None:
+        return "❌ 入队失败：请先上传首帧图片"
     if not negative_prompt:
         negative_prompt = "色调艳丽，过曝，细节模糊不清"
     try:
@@ -380,17 +372,10 @@ def enqueue_task(
         task_dir = TASK_QUEUE_DIR / task_id
         task_dir.mkdir(parents=True, exist_ok=True)
 
-        depth_video_path = _copy_if_exists(depth_video, task_dir, "depth_video.mp4") if depth_video else None
-        template_video_path = _copy_if_exists(template_video, task_dir, "template_video.mp4") if template_video else None
-
-        reference_image_path = _save_pil_image_if_needed(reference_image, task_dir, "reference_image.png")
         first_frame_path = _save_pil_image_if_needed(first_frame, task_dir, "first_frame.png")
         last_frame_path = _save_pil_image_if_needed(last_frame, task_dir, "last_frame.png")
-        animate_reference_image_path = _save_pil_image_if_needed(animate_reference_image, task_dir, "animate_reference_image.png")
 
         params = {
-            "depth_video": depth_video_path,
-            "reference_image": reference_image_path,
             "prompt": prompt,
             "negative_prompt": negative_prompt,
             "seed": int(seed) if seed is not None else -1,
@@ -401,12 +386,10 @@ def enqueue_task(
             "num_frames": int(num_frames) if num_frames is not None else 81,
             "num_inference_steps": int(num_inference_steps) if num_inference_steps is not None else 40,
             "vram_limit": float(vram_limit) if vram_limit is not None else 6.0,
-            "model_id": model_id,
+            "model_id": model_id or INP_MODELS[0],
             "first_frame": first_frame_path,
             "last_frame": last_frame_path,
             "tiled": bool(tiled),
-            "animate_reference_image": animate_reference_image_path,
-            "template_video": template_video_path,
             "save_folder_path": save_folder_path or "./outputs",
             "cfg_scale": float(cfg_scale) if cfg_scale is not None else 1.0,
             "sigma_shift": float(sigma_shift) if sigma_shift is not None else 5.0,
