@@ -1,6 +1,10 @@
 import torch
 import gc
 
+DEFAULT_VRAM_RESERVE_GB = 2.0
+FALLBACK_VRAM_LIMIT_GB = 6.0
+
+
 def clear_vram():
     """释放显存 — 清理 video_processor 中的全局 pipeline 并释放 CUDA 缓存"""
     try:
@@ -65,3 +69,14 @@ def get_vram_info():
             return f"显存使用: {allocated:.2f}GB / {reserved:.2f}GB / {total:.2f}GB (已分配/已保留/总计) [PyTorch备选]"
         except Exception as fallback_e:
             return f"获取显存信息失败: {str(e)} | 备选方案也失败: {str(fallback_e)}"
+
+
+def get_default_vram_limit(reserve_gb=DEFAULT_VRAM_RESERVE_GB):
+    """返回默认显存限制：本机首张 GPU 总显存减去预留显存。"""
+    try:
+        if torch.cuda.is_available():
+            total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            return max(round(total_gb - reserve_gb, 2), 0.0)
+    except Exception:
+        pass
+    return FALLBACK_VRAM_LIMIT_GB

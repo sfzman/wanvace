@@ -141,6 +141,8 @@ def get_task_params_summary(task_data: Dict) -> str:
     lines.append("### 生成参数")
     lines.append(f"- **模型**: {params.get('model_id', 'N/A')}")
     lines.append(f"- **尺寸**: {params.get('width', 'N/A')} × {params.get('height', 'N/A')}")
+    if params.get("video_duration") is not None:
+        lines.append(f"- **视频时长**: {params.get('video_duration')} 秒")
     lines.append(f"- **帧数**: {params.get('num_frames', 'N/A')}")
     lines.append(f"- **推理步数**: {params.get('num_inference_steps', 'N/A')}")
     lines.append(f"- **FPS**: {params.get('fps', 'N/A')}")

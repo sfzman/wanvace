@@ -17,6 +17,8 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 from utils.model_config import INP_MODELS
+from utils.app_config import get_output_dir
+from utils.vram_utils import get_default_vram_limit
 
 # 任务队列配置
 TASK_QUEUE_DIR = Path("./task_queue").resolve()
@@ -26,6 +28,15 @@ TASK_STATUS_DONE = "done"
 TASK_STATUS_FAILED = "failed"
 MAX_RETRIES = 2
 TASK_TIMEOUT = 1200  # 20 分钟
+DEFAULT_SEED = -1
+DEFAULT_FPS = 16
+DEFAULT_QUALITY = 6
+DEFAULT_VIDEO_DURATION = 5
+DEFAULT_INFERENCE_STEPS = 8
+MIN_VIDEO_DURATION = 5
+MAX_VIDEO_DURATION = 10
+DEFAULT_CFG_SCALE = 1.0
+DEFAULT_SIGMA_SHIFT = 5.0
 
 _worker_thread = None
 _worker_stop_event = threading.Event()
@@ -35,6 +46,14 @@ _mp_ctx = mp.get_context("spawn")
 _worker_proc = None
 _task_q = None
 _result_q = None
+
+
+def _clamp_video_duration(video_duration):
+    try:
+        duration = int(video_duration)
+    except (TypeError, ValueError):
+        duration = DEFAULT_VIDEO_DURATION
+    return max(MIN_VIDEO_DURATION, min(MAX_VIDEO_DURATION, duration))
 
 
 # ---------------------------------------------------------------------------
@@ -61,21 +80,21 @@ def _worker_subprocess_fn(task_q, result_q):
             out_path, msg = process_video(
                 params.get("prompt"),
                 params.get("negative_prompt"),
-                params.get("seed", -1),
-                params.get("fps", 16),
-                params.get("quality", 8),
+                params.get("seed", DEFAULT_SEED),
+                params.get("fps", DEFAULT_FPS),
+                params.get("quality", DEFAULT_QUALITY),
                 params.get("height", 480),
                 params.get("width", 832),
-                params.get("num_frames", 81),
-                params.get("num_inference_steps", 30),
-                params.get("vram_limit", 6.0),
+                params.get("num_frames", DEFAULT_FPS * DEFAULT_VIDEO_DURATION + 1),
+                params.get("num_inference_steps", DEFAULT_INFERENCE_STEPS),
+                params.get("vram_limit", get_default_vram_limit()),
                 params.get("model_id", INP_MODELS[0]),
                 params.get("first_frame"),
                 params.get("last_frame"),
                 params.get("tiled", False),
                 "",  # 传空以跳过 process_video 中的复制保存
-                params.get("cfg_scale", 1.0),
-                params.get("sigma_shift", 5.0),
+                params.get("cfg_scale", DEFAULT_CFG_SCALE),
+                params.get("sigma_shift", DEFAULT_SIGMA_SHIFT),
             )
             result_q.put(("ok", out_path, msg))
         except Exception as e:
@@ -273,7 +292,7 @@ def _task_worker_loop():
             moved_video = None
             if out_path:
                 try:
-                    save_folder = params.get("save_folder_path", "./outputs") or "./outputs"
+                    save_folder = params.get("save_folder_path") or get_output_dir()
                     save_folder_abs = Path(save_folder).resolve()
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     subfolder_name = f"generation_{timestamp}_{task_id}"
@@ -349,21 +368,13 @@ def stop_task_worker():
 def enqueue_task(
     prompt,
     negative_prompt,
-    seed,
-    fps,
-    quality,
     height,
     width,
-    num_frames,
-    num_inference_steps,
-    vram_limit,
+    video_duration,
     model_id,
     first_frame,
     last_frame,
-    tiled,
-    save_folder_path,
-    cfg_scale=1.0,
-    sigma_shift=5.0
+    tiled
 ):
     """将当前首尾帧生成请求持久化为任务文件并入队（立即返回）。"""
 
@@ -379,25 +390,30 @@ def enqueue_task(
 
         first_frame_path = _save_pil_image_if_needed(first_frame, task_dir, "first_frame.png")
         last_frame_path = _save_pil_image_if_needed(last_frame, task_dir, "last_frame.png")
+        duration = _clamp_video_duration(video_duration)
+        fps = DEFAULT_FPS
+        num_frames = fps * duration + 1
+        save_folder_path = get_output_dir()
 
         params = {
             "prompt": prompt,
             "negative_prompt": negative_prompt,
-            "seed": int(seed) if seed is not None else -1,
-            "fps": int(fps) if fps is not None else 16,
-            "quality": int(quality) if quality is not None else 8,
+            "seed": DEFAULT_SEED,
+            "fps": fps,
+            "quality": DEFAULT_QUALITY,
             "height": int(height) if height is not None else 480,
             "width": int(width) if width is not None else 832,
-            "num_frames": int(num_frames) if num_frames is not None else 81,
-            "num_inference_steps": int(num_inference_steps) if num_inference_steps is not None else 40,
-            "vram_limit": float(vram_limit) if vram_limit is not None else 6.0,
+            "video_duration": duration,
+            "num_frames": num_frames,
+            "num_inference_steps": DEFAULT_INFERENCE_STEPS,
+            "vram_limit": get_default_vram_limit(),
             "model_id": model_id or INP_MODELS[0],
             "first_frame": first_frame_path,
             "last_frame": last_frame_path,
             "tiled": bool(tiled),
-            "save_folder_path": save_folder_path or "./outputs",
-            "cfg_scale": float(cfg_scale) if cfg_scale is not None else 1.0,
-            "sigma_shift": float(sigma_shift) if sigma_shift is not None else 5.0,
+            "save_folder_path": save_folder_path,
+            "cfg_scale": DEFAULT_CFG_SCALE,
+            "sigma_shift": DEFAULT_SIGMA_SHIFT,
         }
 
         task = {
@@ -416,6 +432,6 @@ def enqueue_task(
         print(f"[enqueue] 新任务已创建: {task_id} 于 {task_dir}")
         start_task_worker()
 
-        return f"✅ 任务已入队：{task_id}\n📁 队列目录：{str(task_dir)}\n⏳ 稍后在后台依次执行，完成后会保存到输出目录。"
+        return f"✅ 任务已入队：{task_id}\n📁 队列目录：{str(task_dir)}\n💾 输出目录：{save_folder_path}\n⏳ 稍后在后台依次执行，完成后会保存到输出目录。"
     except Exception as e:
         return f"❌ 入队失败：{e}"

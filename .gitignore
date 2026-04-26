@@ -1,5 +1,6 @@
 data/
 models/
+.env
 __pycache__/
 .gradio/
 *mp4

@@ -10,8 +10,27 @@ from utils.vram_utils import clear_vram, get_vram_info
 from utils.preview_utils import refresh_preview_list, load_task_preview, delete_task_files
 from utils.model_config import INP_MODELS, ASPECT_RATIOS_14b
 from utils.task_queue import enqueue_task, start_task_worker, stop_task_worker, kill_worker_subprocess
+from utils.app_config import get_output_dir
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+GENERATE_SHORTCUT_JS = """
+() => {
+  if (window.__wanvaceGenerateShortcutBound) {
+    return;
+  }
+  window.__wanvaceGenerateShortcutBound = true;
+  document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      const button = document.querySelector("#generate_video_btn button");
+      if (button && !button.disabled) {
+        button.click();
+      }
+    }
+  });
+}
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +115,7 @@ def update_size_display(aspect_ratio):
 
 def create_preview_tab():
     """创建视频预览标签页"""
+    default_output_dir = get_output_dir()
     with gr.Column():
         gr.Markdown("## 📹 视频预览")
         gr.Markdown("预览已生成的视频及其参数信息 - 点击缩略图选择任务")
@@ -105,7 +125,7 @@ def create_preview_tab():
         with gr.Row():
             preview_output_dir = gr.Textbox(
                 label="输出目录",
-                value="./outputs",
+                value=default_output_dir,
                 placeholder="./outputs 或 /path/to/output/folder",
                 info="指定视频输出目录路径",
                 scale=3
@@ -113,7 +133,7 @@ def create_preview_tab():
             refresh_btn = gr.Button("🔄 刷新列表", variant="primary", scale=1)
 
         # 初始化任务缩略图列表
-        initial_gallery, initial_idx, initial_tasks = refresh_preview_list("./outputs")
+        initial_gallery, initial_idx, initial_tasks = refresh_preview_list(default_output_dir)
         preview_tasks_state = gr.State(initial_tasks)
         selected_task_index_state = gr.State(None)
 
@@ -256,7 +276,7 @@ def create_preview_tab():
 
 def create_interface():
     """创建Gradio界面"""
-    with gr.Blocks(title="首尾帧视频生成器", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="首尾帧视频生成器", theme=gr.themes.Soft(), js=GENERATE_SHORTCUT_JS) as demo:
         gr.Markdown("# 🎬 首尾帧视频生成器")
         gr.Markdown("使用 AnisoraV3.2 模型基于首帧/尾帧生成视频")
 
@@ -296,6 +316,13 @@ def create_interface():
                     with gr.Column(scale=1):
                         gr.Markdown("## ⚙️ 参数设置")
 
+                        generate_btn = gr.Button(
+                            "🎬 生成视频 (Ctrl+Enter)",
+                            variant="primary",
+                            size="lg",
+                            elem_id="generate_video_btn"
+                        )
+
                         # 模型选择
                         model_id = gr.Dropdown(
                             label="选择模型",
@@ -316,19 +343,14 @@ def create_interface():
                             lines=4
                         )
 
-                        with gr.Row():
-                            seed = gr.Number(
-                                label="随机种子",
-                                value=-1,
-                                minimum=-1,
-                            )
-                            fps = gr.Slider(
-                                label="FPS",
-                                value=16,
-                                minimum=1,
-                                maximum=60,
-                                step=1
-                            )
+                        video_duration = gr.Slider(
+                            label="视频时长（秒）",
+                            value=5,
+                            minimum=5,
+                            maximum=10,
+                            step=1,
+                            info="FPS 固定为 16，帧数自动计算为 FPS × 视频时长 + 1"
+                        )
 
                         # 视频尺寸设置
                         gr.Markdown("### 📐 视频尺寸设置")
@@ -372,79 +394,12 @@ def create_interface():
                             info="显示当前显存使用情况"
                         )
 
-                        quality = gr.Slider(
-                            label="质量",
-                            value=6,
-                            minimum=1,
-                            maximum=10,
-                            step=1,
-                            info="1=最低质量，10=最高质量"
-                        )
-
-                        # 新增的高级参数设置
-                        gr.Markdown("### 🔧 高级参数设置")
-
                         with gr.Row():
-                            num_frames = gr.Number(
-                                label="视频帧数",
-                                value=81,
-                                minimum=16,
-                                maximum=256,
-                                step=1,
-                                info="视频总帧数，建议时长（秒）*FPS+1"
-                            )
-                            num_inference_steps = gr.Number(
-                                label="推理步数",
-                                value=8,
-                                minimum=1,
-                                maximum=100,
-                                step=1,
-                                info="推理步数，步数越多质量越高但速度越慢"
-                            )
-
-                        with gr.Row():
-                            cfg_scale = gr.Slider(
-                                label="CFG Scale",
-                                value=1.0,
-                                minimum=1.0,
-                                maximum=20.0,
-                                step=0.5,
-                                info="Classifier-Free Guidance 缩放因子，控制生成结果与提示词的匹配程度"
-                            )
-                            sigma_shift = gr.Slider(
-                                label="Sigma Shift",
-                                value=5.0,
-                                minimum=0.0,
-                                maximum=20.0,
-                                step=0.5,
-                                info="Sigma偏移量，影响生成过程的噪声调度"
-                            )
-
-                        with gr.Row():
-                            vram_limit = gr.Slider(
-                                label="显存占用量限制",
-                                value=48.0,
-                                minimum=0.0,
-                                maximum=200.0,
-                                step=1,
-                                info="显存占用量限制（GB），影响显存使用和性能"
-                            )
                             tiled_checkbox = gr.Checkbox(
                                 label="Tiled VAE Decode",
                                 value=False,
                                 info="是否启用 VAE 分块推理。设置为 `True` 时可显著减少 VAE 编解码阶段的显存占用，会产生少许误差，以及少量推理时间延长。"
                             )
-
-                        # 视频保存设置
-                        gr.Markdown("### 💾 视频保存设置")
-                        save_folder_path = gr.Textbox(
-                            label="视频保存地址",
-                            value="./outputs",
-                            placeholder="./outputs 或 /path/to/save/folder",
-                            info="支持相对路径和绝对路径，每次生成会创建时间戳子文件夹"
-                        )
-
-                        generate_btn = gr.Button("🎬 生成视频", variant="primary", size="lg")
 
                         output_status = gr.Textbox(
                             label="任务状态",
@@ -497,21 +452,13 @@ def create_interface():
                     inputs=[
                         prompt,
                         negative_prompt,
-                        seed,
-                        fps,
-                        quality,
                         height,
                         width,
-                        num_frames,
-                        num_inference_steps,
-                        vram_limit,
+                        video_duration,
                         model_id,
                         first_frame,
                         last_frame,
                         tiled_checkbox,
-                        save_folder_path,
-                        cfg_scale,
-                        sigma_shift
                     ],
                     outputs=[output_status]
                 )
@@ -521,8 +468,8 @@ def create_interface():
         1. **上传首帧图片**：首帧图片是必需的，用于定义视频的起始状态
         2. **上传尾帧图片（可选）**：提供尾帧时生成从首帧到尾帧的过渡视频；不提供则只基于首帧生成
         3. **选择模型**：当前仅保留 **AnisoraV3.2**
-        4. **设置参数**：调整提示词、种子、FPS、质量、视频尺寸和高级参数
-        5. **设置保存地址**：指定视频保存文件夹（支持相对路径和绝对路径）
+        4. **设置参数**：调整提示词、视频时长、视频尺寸和高级参数
+        5. **保存地址**：从 `.env` 读取（推荐 `WANVACE_OUTPUT_DIR=./outputs`）
         6. **生成视频**：点击"生成视频"按钮提交到后台队列
 
         **输入要求**：
@@ -531,9 +478,8 @@ def create_interface():
         - 视频尺寸建议使用 64 的倍数；较大的尺寸会增加处理时间和显存需求
 
         **高级参数说明**：
-        - **视频帧数**：控制生成视频的长度，帧数越多视频越长
-        - **推理步数**：控制生成质量，步数越多质量越高但速度越慢
-        - **显存占用量限制**：控制显存使用，数值越大显存占用越多但性能越好
+        - **视频时长**：可选 5-10 秒；FPS 固定为 16，帧数自动计算为 FPS×时长+1
+        - **推理步数**：固定为 8 步
         - **Tiled VAE Decode**：启用分块VAE解码，可降低 VAE 编解码阶段的显存占用
 
         **视频保存功能**：
