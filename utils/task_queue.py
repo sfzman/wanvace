@@ -129,6 +129,7 @@ def _ensure_task_dirs():
 
 
 def _atomic_write_json(file_path: Path, data: dict):
+    file_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -290,6 +291,10 @@ def _task_worker_loop():
                         dest_task_dir = dest_dir / task_dir.name
                         shutil.move(str(task_dir), str(dest_task_dir))
                         moved_dir = str(dest_task_dir)
+                        task_file = dest_task_dir / task_file.name
+                    else:
+                        # 任务目录可能被用户手动清理；至少把最终 JSON 写到输出目录，便于预览页读取。
+                        task_file = dest_dir / task_file.name
                     print(f"[worker] 已剪切到输出目录: 视频={moved_video}, 任务目录={moved_dir}")
                 except Exception as move_e:
                     print(f"[worker] 剪切到输出目录失败: {move_e}")
