@@ -9,7 +9,10 @@ def clear_vram():
     """释放显存 — 清理 video_processor 中的全局 pipeline 并释放 CUDA 缓存"""
     try:
         import utils.video_processor as vp
-        if vp.pipe is not None:
+        if hasattr(vp, "release_all_pipelines"):
+            print("[clear_vram] 正在释放所有后端 pipeline...")
+            vp.release_all_pipelines()
+        elif vp.pipe is not None:
             print("[clear_vram] 正在释放全局 pipeline...")
             del vp.pipe
             vp.pipe = None

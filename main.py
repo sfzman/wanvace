@@ -6,9 +6,15 @@ import threading
 import gradio as gr
 
 from utils.img_utils import get_image_info
-from utils.vram_utils import clear_vram, get_vram_info
+from utils.vram_utils import clear_vram, get_vram_info, get_default_vram_limit
 from utils.preview_utils import refresh_preview_list, load_task_preview, delete_task_files
-from utils.model_config import INP_MODELS, ASPECT_RATIOS_14b
+from utils.model_config import (
+    INP_MODELS,
+    ASPECT_RATIOS_14b,
+    LTX2_TI2VID_HQ_MODEL,
+    get_model_defaults,
+    get_dimensions_for_model,
+)
 from utils.task_queue import enqueue_task, start_task_worker, stop_task_worker, kill_worker_subprocess
 from utils.app_config import get_output_dir
 
@@ -93,24 +99,38 @@ def handle_clear_vram():
     return clear_vram()
 
 
-def update_dimensions(aspect_ratio):
-    """根据选择的宽高比更新高度和宽度"""
+def update_dimensions(aspect_ratio, model_id):
+    """根据选择的宽高比和模型更新高度和宽度。"""
     if aspect_ratio in ASPECT_RATIOS_14b:
-        width, height = ASPECT_RATIOS_14b[aspect_ratio]
+        width, height = get_dimensions_for_model(aspect_ratio, model_id or INP_MODELS[0])
         return height, width
     return 480, 832  # 默认值
 
 
-def update_size_display(aspect_ratio):
-    """更新Dropdown的info显示当前尺寸"""
+def update_size_display(aspect_ratio, model_id):
+    """更新Dropdown的info显示当前尺寸。"""
     if aspect_ratio in ASPECT_RATIOS_14b:
-        width, height = ASPECT_RATIOS_14b[aspect_ratio]
+        width, height = get_dimensions_for_model(aspect_ratio, model_id or INP_MODELS[0])
         size_text = f"{width} × {height}"
     else:
         size_text = "832 × 480"  # 默认值
 
     info_text = f"选择预设的宽高比，系统会自动计算对应的尺寸\n当前尺寸: {size_text}"
+    if model_id == LTX2_TI2VID_HQ_MODEL:
+        info_text += "\nLTX2 模式：自动按 1080p 档位近似，并对齐到 64 倍数"
     return gr.Dropdown(info=info_text)
+
+
+def update_model_advanced_defaults(model_id):
+    """切换模型时，刷新高级参数默认值。"""
+    defaults = get_model_defaults(model_id or INP_MODELS[0])
+    return (
+        gr.update(value=int(defaults.get("fps", 16))),
+        gr.update(value=int(defaults.get("num_inference_steps", 8))),
+        gr.update(value=float(defaults.get("cfg_scale", 1.0))),
+        gr.update(value=float(defaults.get("sigma_shift", 5.0))),
+        gr.update(value=float(defaults.get("motion_score", 2.5))),
+    )
 
 
 def create_preview_tab():
@@ -161,6 +181,18 @@ def create_preview_tab():
                     value=DEFAULT_PARAM_SUMMARY,
                     label="参数摘要"
                 )
+                preview_first_frame = gr.Image(
+                    label="首帧预览",
+                    height=180,
+                    interactive=False,
+                    type="filepath",
+                )
+                preview_last_frame = gr.Image(
+                    label="尾帧预览",
+                    height=180,
+                    interactive=False,
+                    type="filepath",
+                )
 
         with gr.Row():
             with gr.Column():
@@ -200,25 +232,25 @@ def create_preview_tab():
         # 加载预览事件 - Gallery组件返回选中的索引
         def load_preview(evt: gr.SelectData, tasks, output_dir):
             if evt is None or evt.index is None:
-                return None, DEFAULT_PARAM_SUMMARY, "{}", None
+                return None, None, None, DEFAULT_PARAM_SUMMARY, "{}", None
             if not tasks:
-                return None, "当前没有可预览的任务，请先刷新列表", "{}", None
+                return None, None, None, "当前没有可预览的任务，请先刷新列表", "{}", None
 
             selected_index = evt.index
             if selected_index >= len(tasks):
-                return None, "任务索引已过期，请刷新列表后重试", "{}", None
+                return None, None, None, "任务索引已过期，请刷新列表后重试", "{}", None
 
-            video_path, params_summary_text, task_json = load_task_preview(
+            video_path, first_frame_path, last_frame_path, params_summary_text, task_json = load_task_preview(
                 selected_index,
                 output_dir,
                 cached_tasks=tasks,
             )
-            return video_path, params_summary_text, task_json, selected_index
+            return video_path, first_frame_path, last_frame_path, params_summary_text, task_json, selected_index
 
         task_gallery.select(
             fn=load_preview,
             inputs=[preview_tasks_state, preview_output_dir],
-            outputs=[preview_video, params_summary, task_json_display, selected_task_index_state]
+            outputs=[preview_video, preview_first_frame, preview_last_frame, params_summary, task_json_display, selected_task_index_state]
         )
 
         def delete_selected_task(tasks, selected_index, output_dir):
@@ -230,6 +262,8 @@ def create_preview_tab():
                     gr.update(),
                     gr.update(),
                     gr.update(),
+                    gr.update(),
+                    gr.update(),
                     "当前没有任务可以删除，请先刷新列表"
                 )
             if selected_index is None or selected_index >= len(tasks):
@@ -237,6 +271,8 @@ def create_preview_tab():
                     gr.update(),
                     tasks,
                     None,
+                    gr.update(),
+                    gr.update(),
                     gr.update(),
                     gr.update(),
                     gr.update(),
@@ -254,6 +290,8 @@ def create_preview_tab():
                 new_tasks,
                 None if success else selected_index,
                 gr.update(value=None) if success else gr.update(),
+                gr.update(value=None) if success else gr.update(),
+                gr.update(value=None) if success else gr.update(),
                 gr.update(value=DEFAULT_PARAM_SUMMARY) if success else gr.update(),
                 gr.update(value="{}") if success else gr.update(),
                 message
@@ -267,6 +305,8 @@ def create_preview_tab():
                 preview_tasks_state,
                 selected_task_index_state,
                 preview_video,
+                preview_first_frame,
+                preview_last_frame,
                 params_summary,
                 task_json_display,
                 action_status,
@@ -278,7 +318,7 @@ def create_interface():
     """创建Gradio界面"""
     with gr.Blocks(title="首尾帧视频生成器", theme=gr.themes.Soft(), js=GENERATE_SHORTCUT_JS) as demo:
         gr.Markdown("# 🎬 首尾帧视频生成器")
-        gr.Markdown("使用 AnisoraV3.2 模型基于首帧/尾帧生成视频")
+        gr.Markdown("使用 Anisora / LTX2 模型基于首帧（可选尾帧）生成视频")
 
         # 主Tabs：视频生成和视频预览
         with gr.Tabs() as main_tabs:
@@ -328,8 +368,11 @@ def create_interface():
                             label="选择模型",
                             choices=INP_MODELS,
                             value=INP_MODELS[0],
-                            info="当前仅保留 AnisoraV3.2"
+                            info="支持 AnisoraV3.2 和 LTX2-TI2Vid-HQ（LTX2 需要在 .env 配置模型路径）"
                         )
+
+                        initial_defaults = get_model_defaults(INP_MODELS[0])
+                        default_vram_limit = float(get_default_vram_limit())
 
                         prompt = gr.Textbox(
                             label="正面提示词",
@@ -349,7 +392,7 @@ def create_interface():
                             minimum=5,
                             maximum=10,
                             step=1,
-                            info="FPS 固定为 16，帧数自动计算为 FPS × 视频时长 + 1"
+                            info="帧数自动计算为 FPS × 视频时长 + 1"
                         )
 
                         # 视频尺寸设置
@@ -369,7 +412,7 @@ def create_interface():
                                         label="视频宽度",
                                         value=1280,
                                         minimum=256,
-                                        maximum=1280,
+                                        maximum=2048,
                                         step=64,
                                         info="视频宽度（像素）"
                                     )
@@ -377,7 +420,7 @@ def create_interface():
                                         label="视频高度",
                                         value=720,
                                         minimum=256,
-                                        maximum=1280,
+                                        maximum=2048,
                                         step=64,
                                         info="视频高度（像素）"
                                     )
@@ -394,12 +437,66 @@ def create_interface():
                             info="显示当前显存使用情况"
                         )
 
-                        with gr.Row():
-                            tiled_checkbox = gr.Checkbox(
-                                label="Tiled VAE Decode",
-                                value=False,
-                                info="是否启用 VAE 分块推理。设置为 `True` 时可显著减少 VAE 编解码阶段的显存占用，会产生少许误差，以及少量推理时间延长。"
-                            )
+                        with gr.Accordion("高级参数（默认折叠）", open=False):
+                            with gr.Row():
+                                fps = gr.Slider(
+                                    label="FPS",
+                                    value=int(initial_defaults.get("fps", 16)),
+                                    minimum=8,
+                                    maximum=60,
+                                    step=1,
+                                    info="视频帧率，帧数=FPS×时长+1。推荐 LTX2 使用 24。"
+                                )
+                                num_inference_steps = gr.Slider(
+                                    label="推理步数",
+                                    value=int(initial_defaults.get("num_inference_steps", 8)),
+                                    minimum=4,
+                                    maximum=50,
+                                    step=1,
+                                    info="步数越大质量通常更高，但耗时更长。"
+                                )
+
+                            with gr.Row():
+                                cfg_scale = gr.Slider(
+                                    label="CFG Scale",
+                                    value=float(initial_defaults.get("cfg_scale", 1.0)),
+                                    minimum=0.1,
+                                    maximum=10.0,
+                                    step=0.1,
+                                    info="LTX2 建议约 3.0；Anisora 默认 1.0。"
+                                )
+                                sigma_shift = gr.Slider(
+                                    label="Sigma Shift",
+                                    value=float(initial_defaults.get("sigma_shift", 5.0)),
+                                    minimum=0.0,
+                                    maximum=10.0,
+                                    step=0.1,
+                                    info="主要影响 Anisora 采样行为。"
+                                )
+
+                            with gr.Row():
+                                motion_score = gr.Slider(
+                                    label="Motion Score (Anisora)",
+                                    value=float(initial_defaults.get("motion_score", 2.5)),
+                                    minimum=2.0,
+                                    maximum=5.0,
+                                    step=0.5,
+                                    info="仅用于 Anisora，自动附加到正向提示词（motion score: x.x）。"
+                                )
+
+                            with gr.Row():
+                                vram_limit = gr.Number(
+                                    label="显存限制 (GB)",
+                                    value=default_vram_limit,
+                                    minimum=0.0,
+                                    step=0.1,
+                                    info="用于控制 pipeline 常驻显存预算。"
+                                )
+                                tiled_checkbox = gr.Checkbox(
+                                    label="Tiled VAE Decode",
+                                    value=False,
+                                    info="启用后可降低显存占用，但会增加推理时间。"
+                                )
 
                         output_status = gr.Textbox(
                             label="任务状态",
@@ -412,14 +509,14 @@ def create_interface():
                 # 宽高比选择变化时自动更新尺寸和显示
                 aspect_ratio.change(
                     fn=update_dimensions,
-                    inputs=[aspect_ratio],
+                    inputs=[aspect_ratio, model_id],
                     outputs=[height, width]
                 )
 
                 # 宽高比选择变化时更新Dropdown的info显示
                 aspect_ratio.change(
                     fn=update_size_display,
-                    inputs=[aspect_ratio],
+                    inputs=[aspect_ratio, model_id],
                     outputs=[aspect_ratio]
                 )
 
@@ -447,6 +544,24 @@ def create_interface():
                     outputs=[vram_info]
                 )
 
+                model_id.change(
+                    fn=update_model_advanced_defaults,
+                    inputs=[model_id],
+                    outputs=[fps, num_inference_steps, cfg_scale, sigma_shift, motion_score]
+                )
+
+                model_id.change(
+                    fn=update_dimensions,
+                    inputs=[aspect_ratio, model_id],
+                    outputs=[height, width]
+                )
+
+                model_id.change(
+                    fn=update_size_display,
+                    inputs=[aspect_ratio, model_id],
+                    outputs=[aspect_ratio]
+                )
+
                 generate_btn.click(
                     fn=enqueue_task,
                     inputs=[
@@ -459,6 +574,12 @@ def create_interface():
                         first_frame,
                         last_frame,
                         tiled_checkbox,
+                        fps,
+                        num_inference_steps,
+                        cfg_scale,
+                        sigma_shift,
+                        motion_score,
+                        vram_limit,
                     ],
                     outputs=[output_status]
                 )
@@ -467,7 +588,7 @@ def create_interface():
                 gr.Markdown("""
         1. **上传首帧图片**：首帧图片是必需的，用于定义视频的起始状态
         2. **上传尾帧图片（可选）**：提供尾帧时生成从首帧到尾帧的过渡视频；不提供则只基于首帧生成
-        3. **选择模型**：当前仅保留 **AnisoraV3.2**
+        3. **选择模型**：支持 **AnisoraV3.2** 与 **LTX2-TI2Vid-HQ**
         4. **设置参数**：调整提示词、视频时长、视频尺寸和高级参数
         5. **保存地址**：从 `.env` 读取（推荐 `WANVACE_OUTPUT_DIR=./outputs`）
         6. **生成视频**：点击"生成视频"按钮提交到后台队列
@@ -476,11 +597,15 @@ def create_interface():
         - 首帧图片：必需
         - 尾帧图片：可选
         - 视频尺寸建议使用 64 的倍数；较大的尺寸会增加处理时间和显存需求
+        - LTX2 模型要求宽高必须为 64 的倍数；选择比例时会自动映射到 1080p 档位近似尺寸
 
         **高级参数说明**：
-        - **视频时长**：可选 5-10 秒；FPS 固定为 16，帧数自动计算为 FPS×时长+1
-        - **推理步数**：固定为 8 步
-        - **Tiled VAE Decode**：启用分块VAE解码，可降低 VAE 编解码阶段的显存占用
+        - **高级参数块**：默认折叠，包含 FPS、推理步数、CFG、Sigma Shift、Motion Score、显存限制、Tiled VAE
+        - **FPS 默认值**：随模型切换自动变化（Anisora 默认 16，LTX2 默认 24）
+        - **模型切换**：会自动刷新该模型推荐默认值（例如 LTX2 默认步数 15、CFG 3.0）
+        - **Motion Score (Anisora)**：自动附加到正向提示词模板，范围 2.0-5.0（步长 0.5）
+        - **Anisora 自动追加提示词**：`aesthetic score: 5.0. motion score: X.X. There is no text in the video.`
+        - **Tiled VAE Decode**：启用后可降低显存占用，但会增加推理时间
 
         **视频保存功能**：
         - 每次生成会在保存目录中创建带时间戳的子文件夹

@@ -16,7 +16,7 @@ import uuid
 import shutil
 from pathlib import Path
 from datetime import datetime
-from utils.model_config import INP_MODELS
+from utils.model_config import INP_MODELS, get_model_backend, get_model_defaults
 from utils.app_config import get_output_dir
 from utils.vram_utils import get_default_vram_limit
 
@@ -37,6 +37,7 @@ MIN_VIDEO_DURATION = 5
 MAX_VIDEO_DURATION = 10
 DEFAULT_CFG_SCALE = 1.0
 DEFAULT_SIGMA_SHIFT = 5.0
+DEFAULT_MOTION_SCORE = 2.5
 
 _worker_thread = None
 _worker_stop_event = threading.Event()
@@ -54,6 +55,20 @@ def _clamp_video_duration(video_duration):
     except (TypeError, ValueError):
         duration = DEFAULT_VIDEO_DURATION
     return max(MIN_VIDEO_DURATION, min(MAX_VIDEO_DURATION, duration))
+
+
+def _safe_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +110,7 @@ def _worker_subprocess_fn(task_q, result_q):
                 "",  # 传空以跳过 process_video 中的复制保存
                 params.get("cfg_scale", DEFAULT_CFG_SCALE),
                 params.get("sigma_shift", DEFAULT_SIGMA_SHIFT),
+                params.get("motion_score", DEFAULT_MOTION_SCORE),
             )
             result_q.put(("ok", out_path, msg))
         except Exception as e:
@@ -374,12 +390,30 @@ def enqueue_task(
     model_id,
     first_frame,
     last_frame,
-    tiled
+    tiled,
+    fps=None,
+    num_inference_steps=None,
+    cfg_scale=None,
+    sigma_shift=None,
+    motion_score=None,
+    vram_limit=None,
 ):
     """将当前首尾帧生成请求持久化为任务文件并入队（立即返回）。"""
 
+    selected_model = model_id or INP_MODELS[0]
+    parsed_width = _safe_int(width, 832)
+    parsed_height = _safe_int(height, 480)
+
     if first_frame is None:
         return "❌ 入队失败：请先上传首帧图片"
+    if selected_model not in INP_MODELS:
+        return f"❌ 入队失败：不支持的模型 {selected_model}，当前支持 {', '.join(INP_MODELS)}"
+
+    backend = get_model_backend(selected_model)
+    if backend == "ltx2_ti2vid_hq":
+        if parsed_width % 64 != 0 or parsed_height % 64 != 0:
+            return f"❌ 入队失败：LTX2 模型要求宽高是 64 的倍数，当前为 {parsed_width}x{parsed_height}"
+
     if not negative_prompt:
         negative_prompt = "色调艳丽，过曝，细节模糊不清"
     try:
@@ -391,29 +425,47 @@ def enqueue_task(
         first_frame_path = _save_pil_image_if_needed(first_frame, task_dir, "first_frame.png")
         last_frame_path = _save_pil_image_if_needed(last_frame, task_dir, "last_frame.png")
         duration = _clamp_video_duration(video_duration)
-        fps = DEFAULT_FPS
-        num_frames = fps * duration + 1
+        model_defaults = get_model_defaults(selected_model)
+        resolved_fps = max(1, _safe_int(fps, int(model_defaults.get("fps", DEFAULT_FPS))))
+        resolved_inference_steps = max(
+            1,
+            _safe_int(
+                num_inference_steps,
+                int(model_defaults.get("num_inference_steps", DEFAULT_INFERENCE_STEPS)),
+            ),
+        )
+        resolved_cfg_scale = _safe_float(cfg_scale, float(model_defaults.get("cfg_scale", DEFAULT_CFG_SCALE)))
+        resolved_sigma_shift = _safe_float(sigma_shift, float(model_defaults.get("sigma_shift", DEFAULT_SIGMA_SHIFT)))
+        resolved_motion_score = _safe_float(motion_score, float(model_defaults.get("motion_score", DEFAULT_MOTION_SCORE)))
+        resolved_motion_score = max(2.0, min(5.0, resolved_motion_score))
+        resolved_vram_limit = max(0.0, _safe_float(vram_limit, float(get_default_vram_limit())))
+
+        num_frames = resolved_fps * duration + 1
+        if backend == "ltx2_ti2vid_hq" and (num_frames - 1) % 8 != 0:
+            return f"❌ 入队失败：LTX2 模型要求帧数满足 8k+1，当前计算为 {num_frames}（fps={resolved_fps}, 时长={duration}s）"
+
         save_folder_path = get_output_dir()
 
         params = {
             "prompt": prompt,
             "negative_prompt": negative_prompt,
             "seed": DEFAULT_SEED,
-            "fps": fps,
+            "fps": resolved_fps,
             "quality": DEFAULT_QUALITY,
-            "height": int(height) if height is not None else 480,
-            "width": int(width) if width is not None else 832,
+            "height": parsed_height,
+            "width": parsed_width,
             "video_duration": duration,
             "num_frames": num_frames,
-            "num_inference_steps": DEFAULT_INFERENCE_STEPS,
-            "vram_limit": get_default_vram_limit(),
-            "model_id": model_id or INP_MODELS[0],
+            "num_inference_steps": resolved_inference_steps,
+            "vram_limit": resolved_vram_limit,
+            "model_id": selected_model,
             "first_frame": first_frame_path,
             "last_frame": last_frame_path,
             "tiled": bool(tiled),
             "save_folder_path": save_folder_path,
-            "cfg_scale": DEFAULT_CFG_SCALE,
-            "sigma_shift": DEFAULT_SIGMA_SHIFT,
+            "cfg_scale": resolved_cfg_scale,
+            "sigma_shift": resolved_sigma_shift,
+            "motion_score": resolved_motion_score,
         }
 
         task = {

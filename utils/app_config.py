@@ -47,3 +47,25 @@ def get_output_dir() -> str:
         if value:
             return value
     return DEFAULT_OUTPUT_DIR
+
+
+def get_ltx2_root() -> str:
+    """Return LTX-2 repo root path from env, with a local default fallback."""
+    load_env_file()
+    return os.getenv("LTX2_ROOT", "/home/arkstone/workspace/LTX-2")
+
+
+def get_ltx2_ti2vid_hq_config() -> dict:
+    """Return TI2Vid-HQ pipeline configuration from environment variables."""
+    load_env_file()
+    return {
+        "checkpoint_path": os.getenv("LTX2_CHECKPOINT_PATH"),
+        "distilled_lora_path": os.getenv("LTX2_DISTILLED_LORA_PATH"),
+        "spatial_upsampler_path": os.getenv("LTX2_SPATIAL_UPSAMPLER_PATH"),
+        "gemma_root": os.getenv("LTX2_GEMMA_ROOT"),
+        "distilled_lora_strength_stage_1": float(os.getenv("LTX2_DISTILLED_LORA_STRENGTH_STAGE_1", "0.25")),
+        "distilled_lora_strength_stage_2": float(os.getenv("LTX2_DISTILLED_LORA_STRENGTH_STAGE_2", "0.5")),
+        "image_strength": float(os.getenv("LTX2_IMAGE_STRENGTH", "1.0")),
+        "image_crf": int(os.getenv("LTX2_IMAGE_CRF", "33")),
+        "torch_compile": os.getenv("LTX2_TORCH_COMPILE", "").lower() in {"1", "true", "yes", "on"},
+    }

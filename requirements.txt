@@ -15,10 +15,11 @@ pandas
 matplotlib
 sentencepiece
 diffusers>=0.31.0
-transformers>=4.49.0,<=4.51.3
+transformers>=4.52,<5
 tokenizers>=0.20.3
 accelerate>=1.1.1
 tqdm
+scipy>=1.14
 imageio[ffmpeg]
 easydict
 ftfy

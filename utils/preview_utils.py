@@ -95,6 +95,7 @@ def scan_generation_directories(output_dir: str = "./outputs") -> List[Dict]:
                     "duration_seconds": task_data.get("duration_seconds"),
                     "status": task_data.get("status", "unknown"),
                     "video_path": video_path,
+                    "task_json_path": str(task_json_file),
                     "has_task_json": True,
                     "task_data": task_data,
                 }
@@ -146,6 +147,12 @@ def get_task_params_summary(task_data: Dict) -> str:
     lines.append(f"- **帧数**: {params.get('num_frames', 'N/A')}")
     lines.append(f"- **推理步数**: {params.get('num_inference_steps', 'N/A')}")
     lines.append(f"- **FPS**: {params.get('fps', 'N/A')}")
+    if params.get("cfg_scale") is not None:
+        lines.append(f"- **CFG Scale**: {params.get('cfg_scale')}")
+    if params.get("sigma_shift") is not None:
+        lines.append(f"- **Sigma Shift**: {params.get('sigma_shift')}")
+    if params.get("motion_score") is not None:
+        lines.append(f"- **Motion Score**: {params.get('motion_score')}")
     lines.append(f"- **质量**: {params.get('quality', 'N/A')}")
     lines.append(f"- **种子**: {params.get('seed', 'N/A')}")
     lines.append(f"- **显存限制**: {params.get('vram_limit', 'N/A')} GB")
@@ -346,7 +353,7 @@ def load_task_preview(
     selected_index: int,
     output_dir: str = "./outputs",
     cached_tasks: Optional[List[Dict]] = None,
-) -> Tuple[Optional[str], str, str]:
+) -> Tuple[Optional[str], Optional[str], Optional[str], str, str]:
     """
     加载选中任务的预览信息
     
@@ -355,12 +362,12 @@ def load_task_preview(
         output_dir: 输出目录路径
         
     Returns:
-        (视频路径, 参数摘要, 任务详情JSON)
+        (视频路径, 首帧路径, 尾帧路径, 参数摘要, 任务详情JSON)
     """
     tasks = cached_tasks if cached_tasks is not None else scan_generation_directories(output_dir)
     
     if not tasks or selected_index is None or selected_index >= len(tasks):
-        return None, "未找到任务", "{}"
+        return None, None, None, "未找到任务", "{}"
     
     task = tasks[selected_index]
     video_path = task.get("video_path")
@@ -368,15 +375,44 @@ def load_task_preview(
     # 检查视频文件是否存在
     if video_path and not os.path.exists(video_path):
         video_path = None
-    
-    # 获取参数摘要
+
     task_data = task.get("task_data", {})
+    params = task_data.get("params", {}) if task_data else {}
+    generation_dir = task.get("generation_dir")
+
+    def _resolve_frame_path(frame_key: str) -> Optional[str]:
+        hinted = params.get(frame_key)
+        if hinted and os.path.exists(hinted):
+            hinted_abs = str(Path(hinted).resolve())
+            return hinted_abs if _is_valid_image_file(hinted_abs) else None
+
+        gen_dir = Path(generation_dir).resolve() if generation_dir else None
+        if not gen_dir or not gen_dir.exists():
+            return None
+
+        candidates = []
+        if hinted:
+            hinted_name = Path(hinted).name
+            if hinted_name:
+                candidates.extend(gen_dir.rglob(hinted_name))
+
+        candidates.extend(gen_dir.rglob(f"{frame_key}.*"))
+        for path_obj in candidates:
+            resolved = str(path_obj.resolve())
+            if _is_valid_image_file(resolved):
+                return resolved
+        return None
+
+    first_frame_path = _resolve_frame_path("first_frame")
+    last_frame_path = _resolve_frame_path("last_frame")
+
+    # 获取参数摘要
     params_summary = get_task_params_summary(task_data) if task_data else "无参数信息"
     
     # 返回任务详情JSON（格式化）
     task_json = json.dumps(task_data, ensure_ascii=False, indent=2) if task_data else "{}"
     
-    return video_path, params_summary, task_json
+    return video_path, first_frame_path, last_frame_path, params_summary, task_json
 
 
 def delete_task_files(task: Dict) -> Tuple[bool, str]:
