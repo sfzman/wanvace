@@ -16,6 +16,7 @@ import uuid
 import shutil
 from pathlib import Path
 from datetime import datetime
+import av
 from utils.model_config import INP_MODELS, get_model_backend, get_model_defaults
 from utils.app_config import get_output_dir
 from utils.vram_utils import get_default_vram_limit
@@ -71,6 +72,22 @@ def _safe_float(value, default: float) -> float:
         return default
 
 
+def _get_audio_duration(audio_path: str) -> float | None:
+    try:
+        container = av.open(str(audio_path))
+        try:
+            stream = next(s for s in container.streams if s.type == "audio")
+            if stream.duration is not None and stream.time_base is not None:
+                return float(stream.duration * stream.time_base)
+            if container.duration is not None:
+                return float(container.duration / 1_000_000)
+        finally:
+            container.close()
+    except Exception:
+        return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 子进程管理
 # ---------------------------------------------------------------------------
@@ -106,11 +123,13 @@ def _worker_subprocess_fn(task_q, result_q):
                 params.get("model_id", INP_MODELS[0]),
                 params.get("first_frame"),
                 params.get("last_frame"),
+                params.get("audio_path"),
                 params.get("tiled", False),
                 "",  # 传空以跳过 process_video 中的复制保存
                 params.get("cfg_scale", DEFAULT_CFG_SCALE),
                 params.get("sigma_shift", DEFAULT_SIGMA_SHIFT),
                 params.get("motion_score", DEFAULT_MOTION_SCORE),
+                params.get("audio_front_pad_ratio", 50.0),
             )
             result_q.put(("ok", out_path, msg))
         except Exception as e:
@@ -204,6 +223,16 @@ def _save_pil_image_if_needed(img_obj, dst_dir: Path, filename: str) -> str:
         return str(out_path)
     except Exception:
         return None
+
+
+def _save_audio_file_if_needed(audio_obj, dst_dir: Path, filename: str) -> str:
+    if not audio_obj:
+        return None
+    if isinstance(audio_obj, str):
+        src = Path(audio_obj)
+        ext = src.suffix if src.suffix else ".wav"
+        return _copy_if_exists(audio_obj, dst_dir, f"{filename}{ext}")
+    return None
 
 
 def _recover_orphan_running_tasks():
@@ -390,12 +419,14 @@ def enqueue_task(
     model_id,
     first_frame,
     last_frame,
+    audio_input,
     tiled,
     fps=None,
     num_inference_steps=None,
     cfg_scale=None,
     sigma_shift=None,
     motion_score=None,
+    audio_front_pad_ratio=None,
     vram_limit=None,
 ):
     """将当前首尾帧生成请求持久化为任务文件并入队（立即返回）。"""
@@ -413,6 +444,11 @@ def enqueue_task(
     if backend == "ltx2_ti2vid_hq":
         if parsed_width % 64 != 0 or parsed_height % 64 != 0:
             return f"❌ 入队失败：LTX2 模型要求宽高是 64 的倍数，当前为 {parsed_width}x{parsed_height}"
+    if backend == "ltx2_a2vid":
+        if parsed_width % 64 != 0 or parsed_height % 64 != 0:
+            return f"❌ 入队失败：LTX2 模型要求宽高是 64 的倍数，当前为 {parsed_width}x{parsed_height}"
+        if not audio_input:
+            return "❌ 入队失败：LTX2-A2Vid 需要上传音频文件"
 
     if not negative_prompt:
         negative_prompt = "色调艳丽，过曝，细节模糊不清"
@@ -424,6 +460,9 @@ def enqueue_task(
 
         first_frame_path = _save_pil_image_if_needed(first_frame, task_dir, "first_frame.png")
         last_frame_path = _save_pil_image_if_needed(last_frame, task_dir, "last_frame.png")
+        audio_path = _save_audio_file_if_needed(audio_input, task_dir, "input_audio")
+        if backend == "ltx2_a2vid" and not audio_path:
+            return "❌ 入队失败：音频文件保存失败，请重新上传后重试"
         duration = _clamp_video_duration(video_duration)
         model_defaults = get_model_defaults(selected_model)
         resolved_fps = max(1, _safe_int(fps, int(model_defaults.get("fps", DEFAULT_FPS))))
@@ -438,11 +477,21 @@ def enqueue_task(
         resolved_sigma_shift = _safe_float(sigma_shift, float(model_defaults.get("sigma_shift", DEFAULT_SIGMA_SHIFT)))
         resolved_motion_score = _safe_float(motion_score, float(model_defaults.get("motion_score", DEFAULT_MOTION_SCORE)))
         resolved_motion_score = max(2.0, min(5.0, resolved_motion_score))
+        resolved_audio_front_pad_ratio = _safe_float(audio_front_pad_ratio, 50.0)
+        resolved_audio_front_pad_ratio = max(0.0, min(100.0, resolved_audio_front_pad_ratio))
         resolved_vram_limit = max(0.0, _safe_float(vram_limit, float(get_default_vram_limit())))
 
         num_frames = resolved_fps * duration + 1
-        if backend == "ltx2_ti2vid_hq" and (num_frames - 1) % 8 != 0:
+        if backend in {"ltx2_ti2vid_hq", "ltx2_a2vid"} and (num_frames - 1) % 8 != 0:
             return f"❌ 入队失败：LTX2 模型要求帧数满足 8k+1，当前计算为 {num_frames}（fps={resolved_fps}, 时长={duration}s）"
+        if backend == "ltx2_a2vid":
+            audio_duration = _get_audio_duration(audio_path)
+            video_window = float(num_frames) / float(resolved_fps)
+            if audio_duration is not None and audio_duration > video_window + 0.05:
+                return (
+                    f"❌ 入队失败：音频时长 {audio_duration:.2f}s 大于视频窗口 {video_window:.2f}s。"
+                    "请增大视频时长，或换用不长于视频的音频。"
+                )
 
         save_folder_path = get_output_dir()
 
@@ -461,11 +510,13 @@ def enqueue_task(
             "model_id": selected_model,
             "first_frame": first_frame_path,
             "last_frame": last_frame_path,
+            "audio_path": audio_path,
             "tiled": bool(tiled),
             "save_folder_path": save_folder_path,
             "cfg_scale": resolved_cfg_scale,
             "sigma_shift": resolved_sigma_shift,
             "motion_score": resolved_motion_score,
+            "audio_front_pad_ratio": resolved_audio_front_pad_ratio,
         }
 
         task = {

@@ -19,7 +19,12 @@ from utils.model_config import (
     get_model_backend,
 )
 from utils.video_utils import clean_temp_videos
-from utils.ltx2_processor import clear_ltx2_pipeline, initialize_ltx2_pipeline, process_ltx2_video
+from utils.ltx2_processor import (
+    clear_ltx2_pipeline,
+    initialize_ltx2_pipeline,
+    process_ltx2_a2vid,
+    process_ltx2_video,
+)
 
 DEFAULT_MODEL = ANISORA_MODEL
 
@@ -107,7 +112,7 @@ def initialize_pipeline(model_id=DEFAULT_MODEL, vram_limit=6.0):
 
     if backend == "anisora":
         return _initialize_anisora_pipeline(model_id=model_id, vram_limit=vram_limit)
-    if backend == "ltx2_ti2vid_hq":
+    if backend in {"ltx2_ti2vid_hq", "ltx2_a2vid"}:
         return initialize_ltx2_pipeline(model_id=model_id, vram_limit=vram_limit)
 
     return f"不支持的后端：{backend}"
@@ -145,13 +150,16 @@ def _process_anisora_video(
     model_id=DEFAULT_MODEL,
     first_frame=None,
     last_frame=None,
+    audio_path=None,
     tiled=False,
     save_folder_path="./outputs",
     cfg_scale=1.0,
     sigma_shift=5.0,
     motion_score=2.5,
+    audio_front_pad_ratio=50.0,
 ):
     global pipe
+    del audio_path, audio_front_pad_ratio
 
     if model_id != ANISORA_MODEL:
         return None, f"错误：不支持的模型 {model_id}"
@@ -216,7 +224,7 @@ def _release_pipeline_for_model(model_id: str | None) -> None:
     backend = get_model_backend(model_id)
     if backend == "anisora":
         _clear_anisora_pipeline()
-    elif backend == "ltx2_ti2vid_hq":
+    elif backend in {"ltx2_ti2vid_hq", "ltx2_a2vid"}:
         clear_ltx2_pipeline()
 
 
@@ -234,11 +242,13 @@ def process_video(
     model_id=DEFAULT_MODEL,
     first_frame=None,
     last_frame=None,
+    audio_path=None,
     tiled=False,
     save_folder_path="./outputs",
     cfg_scale=1.0,
     sigma_shift=5.0,
     motion_score=2.5,
+    audio_front_pad_ratio=50.0,
 ):
     """根据所选模型处理视频生成。"""
     global last_used_model
@@ -266,11 +276,13 @@ def process_video(
                 model_id,
                 first_frame,
                 last_frame,
+                audio_path,
                 tiled,
                 save_folder_path,
                 cfg_scale,
                 sigma_shift,
                 motion_score,
+                audio_front_pad_ratio,
             )
         elif backend == "ltx2_ti2vid_hq":
             output_path, message = process_ltx2_video(
@@ -287,10 +299,34 @@ def process_video(
                 model_id,
                 first_frame,
                 last_frame,
+                audio_path,
                 tiled,
                 save_folder_path,
                 cfg_scale,
                 sigma_shift,
+                audio_front_pad_ratio,
+            )
+        elif backend == "ltx2_a2vid":
+            output_path, message = process_ltx2_a2vid(
+                prompt,
+                negative_prompt,
+                seed,
+                fps,
+                quality,
+                height,
+                width,
+                num_frames,
+                num_inference_steps,
+                vram_limit,
+                model_id,
+                first_frame,
+                last_frame,
+                audio_path,
+                tiled,
+                save_folder_path,
+                cfg_scale,
+                sigma_shift,
+                audio_front_pad_ratio,
             )
         else:
             return None, f"错误：未知模型后端 {backend}"

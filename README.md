@@ -1,6 +1,6 @@
 # 首尾帧视频生成器使用说明
 
-这是一个基于 Gradio 的首尾帧视频生成 Web 界面。当前支持 **AnisoraV3.2** 和 **LTX2-TI2Vid-HQ** 两个模型后端。
+这是一个基于 Gradio 的首尾帧视频生成 Web 界面。当前支持 **AnisoraV3.2**、**LTX2-TI2Vid-HQ** 和 **LTX2-A2Vid** 三个模型后端。
 
 ## 快速开始
 
@@ -28,7 +28,7 @@ python scripts/phase0_ltx2_probe.py --ltx2-root /home/arkstone/workspace/LTX-2
 
 ## LTX2 环境变量
 
-启用 `LTX2-TI2Vid-HQ` 需要在 `.env` 配置以下路径：
+启用 LTX2 系列模型（`LTX2-TI2Vid-HQ` / `LTX2-A2Vid`）需要在 `.env` 配置以下路径：
 
 ```bash
 LTX2_ROOT=/home/arkstone/workspace/LTX-2
@@ -38,6 +38,9 @@ LTX2_SPATIAL_UPSAMPLER_PATH=/path/to/spatial_upsampler.safetensors
 LTX2_GEMMA_ROOT=/path/to/gemma_root
 ```
 
+更多可选项见 `.env.example`，包括 `LTX2_QUANTIZATION`、`LTX2_STREAMING_PREFETCH_COUNT`、
+`LTX2_MAX_BATCH_SIZE` 和 `LTX2_TORCH_COMPILE` 等性能/显存开关。
+
 ## 界面功能
 
 ### 输入设置
@@ -46,14 +49,18 @@ LTX2_GEMMA_ROOT=/path/to/gemma_root
 - **图片信息**：上传后自动显示尺寸、格式等信息。
 
 ### 参数设置
-- **模型**：支持 `AnisoraV3.2` 和 `LTX2-TI2Vid-HQ`。
+- **模型**：支持 `AnisoraV3.2`、`LTX2-TI2Vid-HQ` 和 `LTX2-A2Vid`。
 - **正面提示词 / 负面提示词**：控制生成内容与规避内容。
 - **随机种子**：`-1` 表示随机种子。
-- **高级参数块（默认折叠）**：统一放置 `FPS / 推理步数 / CFG Scale / Sigma Shift / Motion Score(Anisora) / 显存限制 / Tiled VAE`。
-- **默认 FPS**：按模型切换（`AnisoraV3.2=16`，`LTX2-TI2Vid-HQ=24`；帧数按 `FPS × 时长 + 1` 自动计算）。
-- **模型默认值**：切换模型时自动刷新（例如 LTX2 默认推理步数 15、CFG 3.0）。
+- **Motion Score (Anisora)**：放在正面提示词下方，仅 Anisora 生效；会自动追加到正向提示词模板。
+- **高级参数块（默认折叠）**：统一放置 `FPS / 推理步数 / CFG Scale / Sigma Shift / 显存限制 / Tiled VAE`。
+- **默认 FPS**：按模型切换（`AnisoraV3.2=16`，`LTX2-TI2Vid-HQ=24`，`LTX2-A2Vid=24`；帧数按 `FPS × 时长 + 1` 自动计算）。
+- **模型默认值**：切换模型时自动刷新（例如 TI2Vid 默认推理步数 15、A2Vid 默认推理步数 30、CFG 3.0）。
 - **Anisora 提示词追加**：会自动在正向提示词后追加 `aesthetic score: 5.0. motion score: X.X. There is no text in the video.`，其中 `X.X` 由 Motion Score 滑块控制（2.0~5.0，步长 0.5）。
-- **视频尺寸**：支持预设宽高比，也支持手动输入宽高；`LTX2-TI2Vid-HQ` 要求宽高必须是 64 的倍数，并会将预设比例自动映射到 1080p 档位近似尺寸。
+- **A2Vid 静音补齐**：音频短于视频时，可在音频上传区域下方用前置静音比例滑块分配前后静音；音频长于视频会直接入队失败。
+- **Tiled VAE 默认值**：LTX2 模型默认开启，降低显存峰值。
+- **音频输入**：`LTX2-A2Vid` 模型需要上传音频文件。
+- **视频尺寸**：支持预设宽高比，也支持手动输入宽高；LTX2 模型要求宽高必须是 64 的倍数，并会将预设比例自动映射到 1080p 档位近似尺寸。
 - **显存占用量限制 / Tiled VAE Decode**：用于平衡显存占用和生成性能。
 - **保存地址**：每次生成会创建时间戳子目录，保存视频、输入图片和任务参数 JSON。
 

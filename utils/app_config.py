@@ -58,6 +58,8 @@ def get_ltx2_root() -> str:
 def get_ltx2_ti2vid_hq_config() -> dict:
     """Return TI2Vid-HQ pipeline configuration from environment variables."""
     load_env_file()
+    streaming_prefetch_count = os.getenv("LTX2_STREAMING_PREFETCH_COUNT", "").strip()
+    max_batch_size = os.getenv("LTX2_MAX_BATCH_SIZE", "").strip()
     return {
         "checkpoint_path": os.getenv("LTX2_CHECKPOINT_PATH"),
         "distilled_lora_path": os.getenv("LTX2_DISTILLED_LORA_PATH"),
@@ -68,4 +70,7 @@ def get_ltx2_ti2vid_hq_config() -> dict:
         "image_strength": float(os.getenv("LTX2_IMAGE_STRENGTH", "1.0")),
         "image_crf": int(os.getenv("LTX2_IMAGE_CRF", "33")),
         "torch_compile": os.getenv("LTX2_TORCH_COMPILE", "").lower() in {"1", "true", "yes", "on"},
+        "quantization": os.getenv("LTX2_QUANTIZATION", "").strip().lower(),
+        "streaming_prefetch_count": int(streaming_prefetch_count) if streaming_prefetch_count else None,
+        "max_batch_size": int(max_batch_size) if max_batch_size else 1,
     }

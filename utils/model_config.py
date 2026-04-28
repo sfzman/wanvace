@@ -6,16 +6,19 @@ from __future__ import annotations
 
 ANISORA_MODEL = "AnisoraV3.2"
 LTX2_TI2VID_HQ_MODEL = "LTX2-TI2Vid-HQ"
+LTX2_A2VID_MODEL = "LTX2-A2Vid"
 
 # 首尾帧模式模型列表
 INP_MODELS = [
     ANISORA_MODEL,
     LTX2_TI2VID_HQ_MODEL,
+    LTX2_A2VID_MODEL,
 ]
 
 MODEL_BACKENDS = {
     ANISORA_MODEL: "anisora",
     LTX2_TI2VID_HQ_MODEL: "ltx2_ti2vid_hq",
+    LTX2_A2VID_MODEL: "ltx2_a2vid",
 }
 
 MODEL_DEFAULTS = {
@@ -25,6 +28,7 @@ MODEL_DEFAULTS = {
         "cfg_scale": 1.0,
         "sigma_shift": 5.0,
         "motion_score": 2.5,
+        "tiled": False,
     },
     LTX2_TI2VID_HQ_MODEL: {
         "fps": 24,
@@ -32,6 +36,15 @@ MODEL_DEFAULTS = {
         "cfg_scale": 3.0,
         "sigma_shift": 5.0,
         "motion_score": 2.5,
+        "tiled": True,
+    },
+    LTX2_A2VID_MODEL: {
+        "fps": 24,
+        "num_inference_steps": 30,
+        "cfg_scale": 3.0,
+        "sigma_shift": 5.0,
+        "motion_score": 2.5,
+        "tiled": True,
     },
 }
 
@@ -118,7 +131,7 @@ def get_dimensions_for_model(aspect_ratio: str, model_id: str) -> tuple[int, int
     """
     返回指定模型在当前宽高比下建议使用的 (width, height)。
     """
-    if get_model_backend(model_id) == "ltx2_ti2vid_hq":
+    if get_model_backend(model_id) in {"ltx2_ti2vid_hq", "ltx2_a2vid"}:
         return _get_ltx2_approx_1080p_size(aspect_ratio)
     return ASPECT_RATIOS_14b.get(aspect_ratio, (832, 480))
 

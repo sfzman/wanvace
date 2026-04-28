@@ -156,6 +156,11 @@ def get_task_params_summary(task_data: Dict) -> str:
     lines.append(f"- **质量**: {params.get('quality', 'N/A')}")
     lines.append(f"- **种子**: {params.get('seed', 'N/A')}")
     lines.append(f"- **显存限制**: {params.get('vram_limit', 'N/A')} GB")
+    if params.get("audio_path"):
+        audio_name = Path(params.get("audio_path")).name
+        lines.append(f"- **音频输入**: {audio_name}")
+    if params.get("audio_front_pad_ratio") is not None:
+        lines.append(f"- **前置静音比例**: {params.get('audio_front_pad_ratio')}%")
     
     if params.get('prompt'):
         lines.append(f"\n### 提示词")

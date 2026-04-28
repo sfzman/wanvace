@@ -4,6 +4,7 @@ import signal
 import atexit
 import threading
 import gradio as gr
+import av
 
 from utils.img_utils import get_image_info
 from utils.vram_utils import clear_vram, get_vram_info, get_default_vram_limit
@@ -11,7 +12,7 @@ from utils.preview_utils import refresh_preview_list, load_task_preview, delete_
 from utils.model_config import (
     INP_MODELS,
     ASPECT_RATIOS_14b,
-    LTX2_TI2VID_HQ_MODEL,
+    get_model_backend,
     get_model_defaults,
     get_dimensions_for_model,
 )
@@ -116,7 +117,7 @@ def update_size_display(aspect_ratio, model_id):
         size_text = "832 × 480"  # 默认值
 
     info_text = f"选择预设的宽高比，系统会自动计算对应的尺寸\n当前尺寸: {size_text}"
-    if model_id == LTX2_TI2VID_HQ_MODEL:
+    if get_model_backend(model_id or INP_MODELS[0]) in {"ltx2_ti2vid_hq", "ltx2_a2vid"}:
         info_text += "\nLTX2 模式：自动按 1080p 档位近似，并对齐到 64 倍数"
     return gr.Dropdown(info=info_text)
 
@@ -130,7 +131,54 @@ def update_model_advanced_defaults(model_id):
         gr.update(value=float(defaults.get("cfg_scale", 1.0))),
         gr.update(value=float(defaults.get("sigma_shift", 5.0))),
         gr.update(value=float(defaults.get("motion_score", 2.5))),
+        gr.update(value=bool(defaults.get("tiled", False))),
     )
+
+
+def update_audio_input_visibility(model_id):
+    backend = get_model_backend(model_id or INP_MODELS[0])
+    visible = backend == "ltx2_a2vid"
+    return gr.update(visible=visible), gr.update(visible=visible)
+
+
+def update_audio_padding_preview(audio_path, video_duration, fps, front_ratio, model_id):
+    """预估 A2Vid 静音补齐分布。"""
+    if get_model_backend(model_id or INP_MODELS[0]) != "ltx2_a2vid":
+        return "仅 LTX2-A2Vid 生效"
+    if not audio_path:
+        return "上传音频后显示静音补齐预估"
+
+    try:
+        container = av.open(str(audio_path))
+        try:
+            stream = next(s for s in container.streams if s.type == "audio")
+            if stream.duration is not None and stream.time_base is not None:
+                audio_duration = float(stream.duration * stream.time_base)
+            elif container.duration is not None:
+                audio_duration = float(container.duration / 1_000_000)
+            else:
+                return "无法读取音频时长，生成时会尝试按视频时长处理"
+        finally:
+            container.close()
+    except Exception as exc:  # noqa: BLE001
+        return f"音频时长读取失败：{exc}"
+
+    try:
+        video_seconds = float(video_duration)
+        resolved_fps = max(1.0, float(fps))
+    except (TypeError, ValueError):
+        return "视频时长或 FPS 无效"
+
+    # 生成帧数为 FPS * 秒数 + 1，LTX2 pipeline 使用 num_frames / fps 作为音频窗口。
+    target_duration = (resolved_fps * video_seconds + 1.0) / resolved_fps
+    if audio_duration > target_duration + 0.05:
+        return f"音频 {audio_duration:.2f}s 大于视频窗口 {target_duration:.2f}s，生成时会报错"
+
+    pad_duration = max(0.0, target_duration - audio_duration)
+    ratio = max(0.0, min(100.0, float(front_ratio or 0.0))) / 100.0
+    front_pad = pad_duration * ratio
+    back_pad = pad_duration - front_pad
+    return f"需补静音 {pad_duration:.2f}s：前 {front_pad:.2f}s / 后 {back_pad:.2f}s"
 
 
 def create_preview_tab():
@@ -353,6 +401,29 @@ def create_interface():
                             info="显示尾帧图片的尺寸、格式等信息"
                         )
 
+                        audio_input = gr.Audio(
+                            label="音频输入 (A2Vid)",
+                            type="filepath",
+                            sources=["upload"],
+                            visible=False,
+                        )
+
+                        with gr.Column(visible=False) as a2vid_audio_controls:
+                            audio_front_pad_ratio = gr.Slider(
+                                label="前置静音比例 (%)",
+                                value=50,
+                                minimum=0,
+                                maximum=100,
+                                step=1,
+                                info="A2Vid：仅当音频短于视频时生效；0=全补后面，50=前后均分，100=全补前面。"
+                            )
+                            audio_padding_preview = gr.Textbox(
+                                label="静音补齐预估",
+                                value="上传音频后显示静音补齐预估",
+                                interactive=False,
+                                lines=2,
+                            )
+
                     with gr.Column(scale=1):
                         gr.Markdown("## ⚙️ 参数设置")
 
@@ -368,7 +439,7 @@ def create_interface():
                             label="选择模型",
                             choices=INP_MODELS,
                             value=INP_MODELS[0],
-                            info="支持 AnisoraV3.2 和 LTX2-TI2Vid-HQ（LTX2 需要在 .env 配置模型路径）"
+                            info="支持 AnisoraV3.2、LTX2-TI2Vid-HQ、LTX2-A2Vid（LTX2 需在 .env 配置模型路径）"
                         )
 
                         initial_defaults = get_model_defaults(INP_MODELS[0])
@@ -378,6 +449,15 @@ def create_interface():
                             label="正面提示词",
                             placeholder="两只可爱的橘猫戴上拳击手套，站在一个拳击台上搏斗。",
                             lines=3
+                        )
+
+                        motion_score = gr.Slider(
+                            label="Motion Score (Anisora)",
+                            value=float(initial_defaults.get("motion_score", 2.5)),
+                            minimum=2.0,
+                            maximum=5.0,
+                            step=0.5,
+                            info="仅 Anisora 生效：提交任务时会追加为 motion score: x.x，LTX2 会忽略。"
                         )
 
                         negative_prompt = gr.Textbox(
@@ -475,16 +555,6 @@ def create_interface():
                                 )
 
                             with gr.Row():
-                                motion_score = gr.Slider(
-                                    label="Motion Score (Anisora)",
-                                    value=float(initial_defaults.get("motion_score", 2.5)),
-                                    minimum=2.0,
-                                    maximum=5.0,
-                                    step=0.5,
-                                    info="仅用于 Anisora，自动附加到正向提示词（motion score: x.x）。"
-                                )
-
-                            with gr.Row():
                                 vram_limit = gr.Number(
                                     label="显存限制 (GB)",
                                     value=default_vram_limit,
@@ -494,7 +564,7 @@ def create_interface():
                                 )
                                 tiled_checkbox = gr.Checkbox(
                                     label="Tiled VAE Decode",
-                                    value=False,
+                                    value=bool(initial_defaults.get("tiled", False)),
                                     info="启用后可降低显存占用，但会增加推理时间。"
                                 )
 
@@ -547,7 +617,14 @@ def create_interface():
                 model_id.change(
                     fn=update_model_advanced_defaults,
                     inputs=[model_id],
-                    outputs=[fps, num_inference_steps, cfg_scale, sigma_shift, motion_score]
+                    outputs=[
+                        fps,
+                        num_inference_steps,
+                        cfg_scale,
+                        sigma_shift,
+                        motion_score,
+                        tiled_checkbox,
+                    ]
                 )
 
                 model_id.change(
@@ -562,6 +639,12 @@ def create_interface():
                     outputs=[aspect_ratio]
                 )
 
+                model_id.change(
+                    fn=update_audio_input_visibility,
+                    inputs=[model_id],
+                    outputs=[audio_input, a2vid_audio_controls]
+                )
+
                 generate_btn.click(
                     fn=enqueue_task,
                     inputs=[
@@ -573,22 +656,31 @@ def create_interface():
                         model_id,
                         first_frame,
                         last_frame,
+                        audio_input,
                         tiled_checkbox,
                         fps,
                         num_inference_steps,
                         cfg_scale,
                         sigma_shift,
                         motion_score,
+                        audio_front_pad_ratio,
                         vram_limit,
                     ],
                     outputs=[output_status]
                 )
 
+                for component in [audio_input, video_duration, fps, audio_front_pad_ratio, model_id]:
+                    component.change(
+                        fn=update_audio_padding_preview,
+                        inputs=[audio_input, video_duration, fps, audio_front_pad_ratio, model_id],
+                        outputs=[audio_padding_preview]
+                    )
+
                 gr.Markdown("## 📚 使用说明")
                 gr.Markdown("""
         1. **上传首帧图片**：首帧图片是必需的，用于定义视频的起始状态
         2. **上传尾帧图片（可选）**：提供尾帧时生成从首帧到尾帧的过渡视频；不提供则只基于首帧生成
-        3. **选择模型**：支持 **AnisoraV3.2** 与 **LTX2-TI2Vid-HQ**
+        3. **选择模型**：支持 **AnisoraV3.2**、**LTX2-TI2Vid-HQ** 与 **LTX2-A2Vid**
         4. **设置参数**：调整提示词、视频时长、视频尺寸和高级参数
         5. **保存地址**：从 `.env` 读取（推荐 `WANVACE_OUTPUT_DIR=./outputs`）
         6. **生成视频**：点击"生成视频"按钮提交到后台队列
@@ -596,16 +688,18 @@ def create_interface():
         **输入要求**：
         - 首帧图片：必需
         - 尾帧图片：可选
+        - 音频输入：LTX2-A2Vid 模型必需
         - 视频尺寸建议使用 64 的倍数；较大的尺寸会增加处理时间和显存需求
         - LTX2 模型要求宽高必须为 64 的倍数；选择比例时会自动映射到 1080p 档位近似尺寸
 
         **高级参数说明**：
-        - **高级参数块**：默认折叠，包含 FPS、推理步数、CFG、Sigma Shift、Motion Score、显存限制、Tiled VAE
+        - **高级参数块**：默认折叠，包含 FPS、推理步数、CFG、Sigma Shift、显存限制、Tiled VAE
         - **FPS 默认值**：随模型切换自动变化（Anisora 默认 16，LTX2 默认 24）
-        - **模型切换**：会自动刷新该模型推荐默认值（例如 LTX2 默认步数 15、CFG 3.0）
+        - **模型切换**：会自动刷新该模型推荐默认值（例如 TI2Vid 默认步数 15、A2Vid 默认步数 30、CFG 3.0）
         - **Motion Score (Anisora)**：自动附加到正向提示词模板，范围 2.0-5.0（步长 0.5）
         - **Anisora 自动追加提示词**：`aesthetic score: 5.0. motion score: X.X. There is no text in the video.`
-        - **Tiled VAE Decode**：启用后可降低显存占用，但会增加推理时间
+        - **A2Vid 静音补齐**：音频短于视频时按滑块比例补前后静音；音频长于视频会报错
+        - **Tiled VAE Decode**：LTX2 默认开启；启用后可降低显存占用，但会增加推理时间
 
         **视频保存功能**：
         - 每次生成会在保存目录中创建带时间戳的子文件夹
