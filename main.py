@@ -18,6 +18,7 @@ from utils.model_config import (
 )
 from utils.task_queue import enqueue_task, start_task_worker, stop_task_worker, kill_worker_subprocess
 from utils.app_config import get_output_dir
+from utils.prompt_translator import translate_prompts
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -445,11 +446,25 @@ def create_interface():
                         initial_defaults = get_model_defaults(INP_MODELS[0])
                         default_vram_limit = float(get_default_vram_limit())
 
-                        prompt = gr.Textbox(
-                            label="正面提示词",
-                            placeholder="两只可爱的橘猫戴上拳击手套，站在一个拳击台上搏斗。",
-                            lines=3
-                        )
+                        with gr.Row():
+                            prompt = gr.Textbox(
+                                label="正面提示词",
+                                placeholder="两只可爱的橘猫戴上拳击手套，站在一个拳击台上搏斗。",
+                                lines=3,
+                                scale=6
+                            )
+                            with gr.Column(scale=1, min_width=180):
+                                translate_btn = gr.Button(
+                                    "🌐 一键翻译为英文",
+                                    variant="secondary",
+                                    size="sm"
+                                )
+                                translation_status = gr.Textbox(
+                                    label="翻译状态",
+                                    value="点击按钮会同时翻译正面和负面提示词",
+                                    interactive=False,
+                                    lines=2
+                                )
 
                         motion_score = gr.Slider(
                             label="Motion Score (Anisora)",
@@ -669,6 +684,12 @@ def create_interface():
                     outputs=[output_status]
                 )
 
+                translate_btn.click(
+                    fn=translate_prompts,
+                    inputs=[prompt, negative_prompt],
+                    outputs=[prompt, negative_prompt, translation_status]
+                )
+
                 for component in [audio_input, video_duration, fps, audio_front_pad_ratio, model_id]:
                     component.change(
                         fn=update_audio_padding_preview,
@@ -682,6 +703,7 @@ def create_interface():
         2. **上传尾帧图片（可选）**：提供尾帧时生成从首帧到尾帧的过渡视频；不提供则只基于首帧生成
         3. **选择模型**：支持 **AnisoraV3.2**、**LTX2-TI2Vid-HQ** 与 **LTX2-A2Vid**
         4. **设置参数**：调整提示词、视频时长、视频尺寸和高级参数
+        4.1 **提示词翻译**：点击“🌐 一键翻译为英文”可同时翻译正面和负面提示词
         5. **保存地址**：从 `.env` 读取（推荐 `WANVACE_OUTPUT_DIR=./outputs`）
         6. **生成视频**：点击"生成视频"按钮提交到后台队列
 

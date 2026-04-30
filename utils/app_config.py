@@ -5,6 +5,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = "./outputs"
 OUTPUT_DIR_ENV_KEYS = ("WANVACE_OUTPUT_DIR", "OUTPUT_DIR", "SAVE_FOLDER_PATH")
+DEFAULT_TRANSLATION_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3"
 _ENV_LOADED = False
 
 
@@ -73,4 +74,29 @@ def get_ltx2_ti2vid_hq_config() -> dict:
         "quantization": os.getenv("LTX2_QUANTIZATION", "").strip().lower(),
         "streaming_prefetch_count": int(streaming_prefetch_count) if streaming_prefetch_count else None,
         "max_batch_size": int(max_batch_size) if max_batch_size else 1,
+    }
+
+
+def get_prompt_translation_config() -> dict:
+    """Return prompt translation API configuration from environment variables."""
+    load_env_file()
+
+    api_key = (
+        os.getenv("ARK_CODING_API_KEY")
+        or os.getenv("ARK_API_KEY")
+        or os.getenv("VOLCENGINE_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+    )
+    model = (
+        os.getenv("ARK_CODING_MODEL")
+        or os.getenv("ARK_MODEL")
+        or os.getenv("OPENAI_MODEL")
+    )
+    timeout = os.getenv("ARK_CODING_TIMEOUT", "60").strip()
+
+    return {
+        "base_url": os.getenv("ARK_CODING_BASE_URL", DEFAULT_TRANSLATION_BASE_URL).rstrip("/"),
+        "api_key": api_key.strip() if api_key else "",
+        "model": model.strip() if model else "",
+        "timeout": int(timeout) if timeout.isdigit() else 60,
     }
